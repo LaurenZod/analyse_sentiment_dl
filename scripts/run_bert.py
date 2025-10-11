@@ -1,19 +1,23 @@
 # scripts/run_bert.py
-# Fine-tuning DistilBERT en PyTorch pur + logging MLflow (MPS/Apple, warmup, clipping, artefacts)
+# Fine-tuning DistilBERT en PyTorch pur + logging MLflow (MPS/Apple ok, warmup, clipping, artefacts)
 
 import os
-os.environ["TRANSFORMERS_NO_TF"] = "1"   # force Transformers en mode PyTorch (pas d'import TF)
+os.environ["TRANSFORMERS_NO_TF"] = "1"        # force Transformers en mode PyTorch
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import time
 import argparse
+import random
+import io
 import numpy as np
 import pandas as pd
 import mlflow
-import random
-import io
 
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import f1_score, accuracy_score, classification_report, confusion_matrix, ConfusionMatrixDisplay
+from sklearn.metrics import (
+    f1_score, accuracy_score, classification_report,
+    ConfusionMatrixDisplay
+)
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -22,6 +26,8 @@ from transformers import (
     AutoTokenizer, AutoModelForSequenceClassification,
     get_linear_schedule_with_warmup
 )
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
@@ -41,6 +47,20 @@ def get_device():
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def balanced_subset(df: pd.DataFrame, total_rows: int, seed: int = 42) -> pd.DataFrame:
+    """Prend un sous-échantillon équilibré (moitié négatifs, moitié positifs)."""
+    n_per_class = total_rows // 2
+    neg = df[df["label"] == 0]
+    pos = df[df["label"] == 1]
+    take_neg = min(n_per_class, len(neg))
+    take_pos = min(n_per_class, len(pos))
+    dfb = pd.concat([
+        neg.sample(n=take_neg, random_state=seed),
+        pos.sample(n=take_pos, random_state=seed)
+    ])
+    return dfb.sample(frac=1.0, random_state=seed).reset_index(drop=True)
 
 
 # ----------------------
@@ -115,7 +135,9 @@ def eval_epoch(model, dataloader, device):
         preds.extend(torch.argmax(logits, dim=1).detach().cpu().numpy())
         labels.extend(y.detach().cpu().numpy())
 
-    return np.mean(losses), f1_score(labels, preds, average="macro"), accuracy_score(labels, preds), np.array(labels), np.array(preds)
+    y_true = np.array(labels)
+    y_pred = np.array(preds)
+    return np.mean(losses), f1_score(y_true, y_pred, average="macro"), accuracy_score(y_true, y_pred), y_true, y_pred
 
 
 # ----------------------
@@ -124,7 +146,8 @@ def eval_epoch(model, dataloader, device):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=str, required=True)
-    parser.add_argument("--subset_rows", type=int, default=200000)
+    parser.add_argument("--subset_rows", type=int, default=200000,
+                        help="Sous-échantillon équilibré si renseigné (≈ moitié nég/pos).")
     parser.add_argument("--model_name", type=str, default="distilbert-base-uncased")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=32)
@@ -138,40 +161,51 @@ def main():
     device = get_device()
     print("Device:", device)
 
+    # MLflow local
+    mlflow.set_tracking_uri("file:./mlruns")
+    mlflow.set_experiment(args.exp_name)
+
     # Chargement données
     cols = ["target","ids","date","flag","user","text"]
-    df = pd.read_csv(args.data, header=None, names=cols, encoding="ISO-8859-1", engine="python", on_bad_lines="skip")
-    df["label"] = df["target"].map({0:0, 4:1})
+    df = pd.read_csv(
+        args.data, header=None, names=cols, encoding="ISO-8859-1",
+        engine="python", on_bad_lines="skip"
+    )
+    # Mapping aligné: 0 = négatif (target=0), 1 = positif (target=4)
+    df["label"] = df["target"].map({0:0, 4:1}).astype(int)
     df = df[["text","label"]].dropna()
 
+    assert set(df["label"].unique()) <= {0, 1}
+
+    # Sous-échantillon équilibré si demandé
     if args.subset_rows:
-        df = df.sample(n=args.subset_rows, random_state=args.seed)
+        df = balanced_subset(df, total_rows=args.subset_rows, seed=args.seed)
 
     train_texts, val_texts, y_train, y_val = train_test_split(
         df["text"], df["label"], test_size=0.2, stratify=df["label"], random_state=args.seed
     )
 
-    # Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    # Tokenizer / Datasets
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
     train_ds = TweetDataset(train_texts, y_train, tokenizer, args.max_length)
     val_ds   = TweetDataset(val_texts, y_val, tokenizer, args.max_length)
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2, pin_memory=True)
-    val_loader   = DataLoader(val_ds, batch_size=args.batch_size, num_workers=2, pin_memory=True)
+    # DataLoaders (pin_memory utile uniquement en CUDA)
+    pin_mem = (device.type == "cuda")
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=pin_mem)
+    val_loader   = DataLoader(val_ds, batch_size=args.batch_size, num_workers=0, pin_memory=pin_mem)
 
     # Modèle
     model = AutoModelForSequenceClassification.from_pretrained(args.model_name, num_labels=2).to(device)
 
     total_steps = len(train_loader) * args.epochs
-    warmup_steps = int(0.1 * total_steps)
+    warmup_steps = max(1, int(0.1 * total_steps))
 
     optimizer = AdamW(model.parameters(), lr=args.lr)
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
     )
 
-    # Tracking MLflow
-    mlflow.set_experiment(args.exp_name)
     with mlflow.start_run(run_name=f"{args.model_name}_finetune"):
         mlflow.log_params({
             **vars(args),
@@ -185,9 +219,12 @@ def main():
         best_path = f"models/{args.model_name.replace('/', '_')}"
         os.makedirs(best_path, exist_ok=True)
 
+        last_y_true, last_y_pred = None, None
+
         for epoch in range(args.epochs):
             tr_loss, tr_f1, tr_acc = train_epoch(model, train_loader, optimizer, scheduler, device)
             val_loss, val_f1, val_acc, y_true, y_pred = eval_epoch(model, val_loader, device)
+            last_y_true, last_y_pred = y_true, y_pred
 
             print(f"Epoch {epoch+1}/{args.epochs} | "
                   f"Train loss {tr_loss:.4f} f1 {tr_f1:.4f} acc {tr_acc:.4f} | "
@@ -203,24 +240,26 @@ def main():
                 best_val_f1 = val_f1
                 model.save_pretrained(best_path)
                 tokenizer.save_pretrained(best_path)
+                # log uniquement le répertoire une seule fois (si tu veux éviter les multiples copies, déplace ce log hors de la boucle)
                 mlflow.log_artifacts(best_path)
 
-        dur = time.time()-start
+        dur = time.time() - start
         mlflow.log_metric("duration", dur)
 
-        # Artefacts : confusion matrix + classification report
-        fig, ax = plt.subplots()
-        ConfusionMatrixDisplay.from_predictions(y_true, y_pred, ax=ax)
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
-        plt.close(fig)
-        with open("confusion_val.png", "wb") as f:
-            f.write(buf.getvalue())
-        mlflow.log_artifact("confusion_val.png")
+        # Artefacts : confusion matrix + classification report (sur la dernière éval)
+        if last_y_true is not None and last_y_pred is not None:
+            fig, ax = plt.subplots()
+            ConfusionMatrixDisplay.from_predictions(last_y_true, last_y_pred, ax=ax)
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
+            plt.close(fig)
+            with open("confusion_val.png", "wb") as f:
+                f.write(buf.getvalue())
+            mlflow.log_artifact("confusion_val.png")
 
-        with open("classification_report.txt", "w") as f:
-            f.write(classification_report(y_true, y_pred, digits=4))
-        mlflow.log_artifact("classification_report.txt")
+            with open("classification_report.txt", "w") as f:
+                f.write(classification_report(last_y_true, last_y_pred, digits=4))
+            mlflow.log_artifact("classification_report.txt")
 
         print(f"✅ {args.model_name} — best Val F1_macro: {best_val_f1:.4f} | dur: {dur:.1f}s")
 

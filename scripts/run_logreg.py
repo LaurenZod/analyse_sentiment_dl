@@ -1,11 +1,12 @@
 # scripts/run_logreg.py
 import matplotlib
 matplotlib.use("Agg")
-import os, re, time, argparse, subprocess, joblib
+import os, re, time, argparse, subprocess, joblib, random
 import numpy as np
 import pandas as pd
 import mlflow, mlflow.sklearn
 import matplotlib.pyplot as plt
+from scripts.utils_text import transform_bow
 
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
@@ -16,7 +17,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 
 # ------------------------------------------------------------------
-# Configuration simple via CLI
+# CLI
 # ------------------------------------------------------------------
 def parse_args():
     ap = argparse.ArgumentParser(description="Train TF-IDF + Logistic Regression on Sentiment140 and log to MLflow")
@@ -35,22 +36,7 @@ def parse_args():
     return ap.parse_args()
 
 # ------------------------------------------------------------------
-# Prétraitement léger (cohérent avec ton notebook)
-# ------------------------------------------------------------------
-URL = re.compile(r'https?://\S+|www\.\S+')
-USER = re.compile(r'@\w+')
-HASH = re.compile(r'#(\w+)')
-WS   = re.compile(r'\s+')
-
-def transform_bow(t: str) -> str:
-    t = URL.sub(' ', str(t))
-    t = USER.sub(' ', t)
-    t = HASH.sub(r'\1', t)   # garde le mot sans '#'
-    t = WS.sub(' ', t).strip().lower()
-    return t
-
-# ------------------------------------------------------------------
-# Utilitaires logging
+# Utils logging
 # ------------------------------------------------------------------
 def git_info():
     def _git(args):
@@ -71,7 +57,7 @@ def plot_and_log_confusion(y_true, y_pred):
     plt.title("Confusion matrix")
     plt.colorbar()
     ticks = np.arange(2)
-    plt.xticks(ticks, ["non_neg","neg"]); plt.yticks(ticks, ["non_neg","neg"])
+    plt.xticks(ticks, ["neg","pos"]); plt.yticks(ticks, ["neg","pos"])
     for i in range(2):
         for j in range(2):
             plt.text(j, i, cm[i, j], ha="center", va="center")
@@ -96,36 +82,38 @@ def plot_and_log_roc(y_true, y_score):
 def main():
     args = parse_args()
 
-    # 1) Initialiser MLflow (stockage local ./mlruns)
+    # Seeds (reproductibilité)
+    np.random.seed(args.random_state)
+    random.seed(args.random_state)
+
+    # MLflow
     mlflow.set_tracking_uri("file:./mlruns")
     mlflow.set_experiment(args.experiment)
 
-    # 2) Charger Sentiment140
+    # Lecture CSV (Sentiment140)
     read_kwargs = dict(
         header=None,
         names=["target","ids","date","flag","user","text"],
         sep=",", encoding="ISO-8859-1", quotechar='"', engine="python"
     )
     if args.subset_rows:
-        # Lire tout puis échantillonner équilibré
         df_full = pd.read_csv(args.data, **read_kwargs)
-        df_full["label"] = df_full["target"].map({0:1, 4:0}).astype(int)
+        df_full["label"] = df_full["target"].map({0:0, 4:1}).astype(int)
         df_full = df_full[["text","label"]].dropna()
-        
+
         n = args.subset_rows // 2
-        df_neg = df_full[df_full["label"] == 1].sample(n=n, random_state=args.random_state)
-        df_pos = df_full[df_full["label"] == 0].sample(n=n, random_state=args.random_state)
+        # Sécurise si une classe a moins que n
+        n_neg = min(n, (df_full["label"] == 1).sum())
+        n_pos = min(n, (df_full["label"] == 0).sum())
+        df_neg = df_full[df_full["label"] == 1].sample(n=n_neg, random_state=args.random_state)
+        df_pos = df_full[df_full["label"] == 0].sample(n=n_pos, random_state=args.random_state)
         df = pd.concat([df_neg, df_pos]).sample(frac=1.0, random_state=args.random_state).reset_index(drop=True)
     else:
         df = pd.read_csv(args.data, **read_kwargs)
-        df["label"] = df["target"].map({0:1, 4:0}).astype(int)
+        df["label"] = df["target"].map({0:0, 4:1}).astype(int)
         df = df[["text","label"]].dropna()
 
-    # Label binaire cohérent avec ton entraînement précédent :
-    # 1 = négatif (target=0), 0 = non-négatif (target=4)
-    df["label"] = df["target"].map({0:1, 4:0}).astype(int)
-    df = df[["text","label"]].dropna()
-
+    # Prétraitement léger
     X = df["text"].astype(str).apply(transform_bow)
     y = df["label"].astype(int)
 
@@ -133,14 +121,12 @@ def main():
         X, y, test_size=args.test_size, random_state=args.random_state, stratify=y
     )
 
-    # 3) Entraînement + logging MLflow
-    run_name = f"logreg_tfidf_C{args.C}_ng12"
+    # Entraînement + logging
+    run_name = f"logreg_tfidf_C{args.C}_ng1{args.ngram_max}"
     with mlflow.start_run(run_name=run_name):
-        # Tags Git
         for k, v in git_info().items():
             if v: mlflow.set_tag(k, v)
 
-        # Log params
         mlflow.log_params({
             "vectorizer": "tfidf",
             "ngram_range": f"(1,{args.ngram_max})",
@@ -152,47 +138,47 @@ def main():
             "class_weight": "balanced",
             "test_size": args.test_size,
             "subset_rows": args.subset_rows,
+            "seed": args.random_state
         })
 
-        # Vectorizer + modèle
-        vec = TfidfVectorizer(ngram_range=(1, args.ngram_max),
-                              max_features=args.max_features, min_df=args.min_df)
+        vec = TfidfVectorizer(
+            ngram_range=(1, args.ngram_max),
+            max_features=args.max_features,
+            min_df=args.min_df
+        )
+
         t0 = time.perf_counter()
         Xtr = vec.fit_transform(X_train)
         Xte = vec.transform(X_test)
 
-        clf = LogisticRegression(max_iter=1000, C=args.C,
-                                 class_weight="balanced", solver="liblinear")
+        clf = LogisticRegression(
+            max_iter=1000, C=args.C, class_weight="balanced", solver="liblinear"
+        )
         clf.fit(Xtr, y_train)
         dur = time.perf_counter() - t0
         mlflow.log_metric("duration_sec", float(dur))
 
-        # Metrics
         y_pred = clf.predict(Xte)
         f1 = f1_score(y_test, y_pred, average="macro")
         acc = accuracy_score(y_test, y_pred)
         mlflow.log_metric("f1_macro", float(f1))
         mlflow.log_metric("accuracy", float(acc))
 
-        # Courbe ROC (probabilité classe 1 = négatif)
         if hasattr(clf, "predict_proba"):
             y_score = clf.predict_proba(Xte)[:, 1]
             plot_and_log_roc(y_test, y_score)
 
-        # Confusion + rapport texte
         plot_and_log_confusion(y_test, y_pred)
         report = classification_report(y_test, y_pred, digits=3)
         with open("classification_report.txt", "w") as f:
             f.write(report)
         mlflow.log_artifact("classification_report.txt")
 
-        # Sauvegarde du pack (vectorizer + modèle) pour réutiliser l'inférence
         os.makedirs("models/baseline", exist_ok=True)
         out = "models/baseline/tfidf_logreg.joblib"
         joblib.dump({"vectorizer": vec, "model": clf}, out)
         mlflow.log_artifact(out)
 
-        # Sauvegarde aussi au format MLflow (modèle seul)
         mlflow.sklearn.log_model(clf, artifact_path="sk_model")
 
         print(f"✅ F1_macro: {f1:.4f} | accuracy: {acc:.4f} | duration_sec: {dur:.2f}")
