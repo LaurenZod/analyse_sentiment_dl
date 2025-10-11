@@ -6,7 +6,7 @@ __pycache__/
 .ipynb_checkpoints/
 
 # Données et artefacts
-data/
+data/embeddings/
 mlruns/
 models/
 artifacts/
