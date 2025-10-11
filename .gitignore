@@ -1,23 +1,31 @@
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+
 # Python
-.venv*/
 __pycache__/
 *.pyc
-.DS_Store
+*.pyo
+*.pyd
+*.egg-info/
+.venv*/
+venv/
+.env
+
+# Notebooks
 .ipynb_checkpoints/
 
-# Données et artefacts
-data/embeddings/
+# Données & artefacts lourds
+data/
 mlruns/
 models/
-artifacts/
-artifacts_local/
-
-# Fichiers lourds
-*.csv
-*.h5
 *.pt
 *.pth
-*.bin
+*.h5
 *.keras
-*.tflite
-*.safetensors
+*.joblib
+*.log
+
+# Fichiers spécifiques projet
+training.1600000.processed.noemoticon.csv

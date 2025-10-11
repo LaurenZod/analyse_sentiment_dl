@@ -1,4 +1,6 @@
 # scripts/run_logreg.py
+import matplotlib
+matplotlib.use("Agg")
 import os, re, time, argparse, subprocess, joblib
 import numpy as np
 import pandas as pd
@@ -105,12 +107,19 @@ def main():
         sep=",", encoding="ISO-8859-1", quotechar='"', engine="python"
     )
     if args.subset_rows:
-        df = pd.read_csv(args.data, nrows=args.subset_rows, **read_kwargs)
-        # ATTENTION : le CSV est souvent trié par polarité. Pour éviter la mono-classe :
-        # On mélange rapidement :
-        df = df.sample(frac=1.0, random_state=args.random_state).reset_index(drop=True)
+        # Lire tout puis échantillonner équilibré
+        df_full = pd.read_csv(args.data, **read_kwargs)
+        df_full["label"] = df_full["target"].map({0:1, 4:0}).astype(int)
+        df_full = df_full[["text","label"]].dropna()
+        
+        n = args.subset_rows // 2
+        df_neg = df_full[df_full["label"] == 1].sample(n=n, random_state=args.random_state)
+        df_pos = df_full[df_full["label"] == 0].sample(n=n, random_state=args.random_state)
+        df = pd.concat([df_neg, df_pos]).sample(frac=1.0, random_state=args.random_state).reset_index(drop=True)
     else:
         df = pd.read_csv(args.data, **read_kwargs)
+        df["label"] = df["target"].map({0:1, 4:0}).astype(int)
+        df = df[["text","label"]].dropna()
 
     # Label binaire cohérent avec ton entraînement précédent :
     # 1 = négatif (target=0), 0 = non-négatif (target=4)
