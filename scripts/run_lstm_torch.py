@@ -1,319 +1,307 @@
 # scripts/run_lstm_torch.py
-# LSTM + GloVe (PyTorch pur) avec tracking MLflow
-
-import os
-import re
-import time
-import argparse
+import os, re, io, time, argparse, random, math, subprocess
 from collections import Counter
 
 import numpy as np
 import pandas as pd
 import mlflow
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from sklearn.metrics import f1_score, accuracy_score, confusion_matrix, classification_report
-
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
+# ---------- Utils device / seed ----------
+def get_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
-# -----------------------
-# Prétraitement minimal
-# -----------------------
-URL_RE = re.compile(r'https?://\S+|www\.\S+', re.IGNORECASE)
-USER_RE = re.compile(r'@\w+')
-HASH_RE = re.compile(r'#(\w+)')
-MULTIWS = re.compile(r'\s+')
-WORD_RE = re.compile(r"[A-Za-z0-9_']+")
-PAD_TOKEN = "<PAD>"
-OOV_TOKEN = "<OOV>"
+def set_seed(seed=42):
+    random.seed(seed); np.random.seed(seed)
+    torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
 
-def normalize_text(t: str) -> str:
-    t = URL_RE.sub(' ', t)
-    t = USER_RE.sub(' ', t)
-    t = HASH_RE.sub(r'\1', t)
-    t = MULTIWS.sub(' ', t).strip()
-    return t.lower()
+# ---------- Light text cleaning ----------
+URL = re.compile(r'https?://\S+|www\.\S+')
+USER = re.compile(r'@\w+')
+HASH = re.compile(r'#(\w+)')
+WS   = re.compile(r'\s+')
 
-def tokenize(t: str):
-    return WORD_RE.findall(t)  # simple découpe alphanum/apostrophe
+def normalize_light(t: str) -> str:
+    t = URL.sub(' ', str(t))
+    t = USER.sub(' ', t)
+    t = HASH.sub(r'\1', t)
+    t = WS.sub(' ', t).strip().lower()
+    return t
 
+# ---------- Data loading ----------
+READ_KW = dict(
+    header=None, names=["target","ids","date","flag","user","text"],
+    sep=",", encoding="ISO-8859-1", quotechar='"', engine="python"
+)
 
-# -----------------------
-# Vocab & séquences
-# -----------------------
-def build_vocab(texts, max_tokens=80000, min_freq=1):
+def load_balanced_subset_csv(path, per_class, chunksize=100_000, seed=42):
+    want_neg = per_class   # target 0  -> label 0 (négatif)
+    want_pos = per_class   # target 4  -> label 1 (positif)
+    neg_parts, pos_parts = [], []
+    for chunk in pd.read_csv(path, chunksize=chunksize, on_bad_lines="skip", **READ_KW):
+        # Mapping cohérent: 0 = négatif (target=0), 1 = positif (target=4)
+        chunk["label"] = chunk["target"].map({0:0, 4:1}).astype(int)
+        cneg = chunk[chunk["label"] == 0][["text","label"]]
+        cpos = chunk[chunk["label"] == 1][["text","label"]]
+        if want_neg > 0 and len(cneg):
+            take = min(want_neg, len(cneg)); neg_parts.append(cneg.sample(n=take, random_state=seed)); want_neg -= take
+        if want_pos > 0 and len(cpos):
+            take = min(want_pos, len(cpos)); pos_parts.append(cpos.sample(n=take, random_state=seed)); want_pos -= take
+        if want_neg <= 0 and want_pos <= 0:
+            break
+    df = pd.concat(neg_parts + pos_parts, ignore_index=True)
+    return df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+
+# ---------- Vocab / vectorization ----------
+PAD, UNK = "<pad>", "<unk>"
+
+def build_vocab(texts, max_tokens=80_000, min_freq=1):
     counter = Counter()
     for t in texts:
-        counter.update(tokenize(t))
-    # tokens triés par fréquence
-    vocab = [PAD_TOKEN, OOV_TOKEN] + [w for w, c in counter.most_common() if c >= min_freq]
-    if len(vocab) > max_tokens:
-        vocab = vocab[:max_tokens]
-    stoi = {w: i for i, w in enumerate(vocab)}
-    itos = {i: w for w, i in stoi.items()}
-    return stoi, itos
+        counter.update(t.split())
+    # garde tokens par fréquence, + PAD/UNK en tête
+    vocab = [PAD, UNK] + [w for w, c in counter.most_common(max_tokens-2) if c >= min_freq]
+    stoi = {w:i for i, w in enumerate(vocab)}
+    return vocab, stoi
 
-def text_to_ids(text, stoi, seq_len):
-    toks = tokenize(text)
-    ids = [stoi.get(tok, stoi[OOV_TOKEN]) for tok in toks]
-    if len(ids) >= seq_len:
-        return ids[:seq_len]
-    # pad
-    return ids + [stoi[PAD_TOKEN]] * (seq_len - len(ids))
+def texts_to_ids(texts, stoi, seq_len):
+    ids = []
+    unk = stoi[UNK]
+    for t in texts:
+        toks = t.split()
+        row = [stoi.get(w, unk) for w in toks[:seq_len]]
+        if len(row) < seq_len:
+            row += [0]*(seq_len-len(row))
+        ids.append(row)
+    return torch.tensor(ids, dtype=torch.long)
 
-
-# -----------------------
-# Chargement GloVe
-# -----------------------
-def load_glove_matrix(path_txt: str, embedding_dim: int, stoi: dict):
-    embedding_matrix = np.random.normal(scale=0.6, size=(len(stoi), embedding_dim)).astype("float32")
-    # PAD = 0 vector
-    embedding_matrix[stoi[PAD_TOKEN]] = np.zeros((embedding_dim,), dtype="float32")
+# ---------- Load GloVe into matrix ----------
+def load_glove_txt(path, embedding_dim, vocab):
+    vocab_to_index = {t:i for i,t in enumerate(vocab)}
+    matrix = np.random.normal(scale=0.01, size=(len(vocab), embedding_dim)).astype(np.float32)
+    if vocab and vocab[0] == PAD:
+        matrix[0] = 0.0
     found = 0
-    with open(path_txt, "r", encoding="utf-8") as f:
+    with io.open(path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             parts = line.rstrip().split(" ")
-            word = parts[0]
-            vec = parts[1:]
-            if len(vec) != embedding_dim:
+            if len(parts) < embedding_dim + 1:
                 continue
-            if word in stoi:
-                embedding_matrix[stoi[word]] = np.asarray(vec, dtype="float32")
+            w = parts[0]
+            idx = vocab_to_index.get(w)
+            if idx is not None:
+                try:
+                    vec = np.asarray(parts[-embedding_dim:], dtype="float32")
+                except Exception:
+                    continue
+                matrix[idx] = vec
                 found += 1
-    return embedding_matrix, found
+    return torch.tensor(matrix), found
 
-
-# -----------------------
-# Dataset PyTorch
-# -----------------------
+# ---------- Dataset ----------
 class SeqDataset(Dataset):
-    def __init__(self, texts, labels, stoi, seq_len):
-        self.texts = list(texts)
-        self.labels = list(labels)
-        self.stoi = stoi
-        self.seq_len = seq_len
-
-    def __len__(self):
-        return len(self.texts)
-
+    def __init__(self, X_ids, y):
+        self.X = X_ids
+        self.y = torch.tensor(y, dtype=torch.float32)
+    def __len__(self): return self.X.size(0)
     def __getitem__(self, i):
-        ids = text_to_ids(self.texts[i], self.stoi, self.seq_len)
-        return torch.tensor(ids, dtype=torch.long), torch.tensor(self.labels[i], dtype=torch.float32)
+        return self.X[i], self.y[i]
 
-
-# -----------------------
-# Modèle LSTM
-# -----------------------
-class LSTMSentiment(nn.Module):
-    def __init__(self, vocab_size, embedding_dim, hidden_size=128, bidirectional=False,
-                 dropout=0.4, pad_idx=0, embedding_matrix=None, freeze_embed=False):
+# ---------- Model ----------
+class LSTMClassifier(nn.Module):
+    def __init__(self, embedding_matrix, hidden=128, bidirectional=True, dropout=0.3, freeze_embed_epochs=0):
         super().__init__()
-        self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=pad_idx)
-        if embedding_matrix is not None:
-            self.embedding.weight.data.copy_(torch.from_numpy(embedding_matrix))
-        self.embedding.weight.requires_grad = not freeze_embed
+        vocab_size, emb_dim = embedding_matrix.shape
+        self.embedding = nn.Embedding(vocab_size, emb_dim, padding_idx=0)
+        self.embedding.weight.data.copy_(embedding_matrix)
+        self.embedding.weight.requires_grad = (freeze_embed_epochs == 0)
 
         self.lstm = nn.LSTM(
-            input_size=embedding_dim,
-            hidden_size=hidden_size,
-            num_layers=1,
-            batch_first=True,
-            bidirectional=bidirectional,
-            dropout=0.0  # dropout inter-couches s'applique si num_layers>1
+            input_size=emb_dim, hidden_size=hidden, batch_first=True,
+            bidirectional=bidirectional
         )
-        lstm_out_dim = hidden_size * (2 if bidirectional else 1)
+        out_dim = hidden * (2 if bidirectional else 1)
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(lstm_out_dim, 1)  # binaire
+        self.fc = nn.Linear(out_dim, 1)
+
+    def unfreeze_embedding(self):
+        self.embedding.weight.requires_grad = True
 
     def forward(self, x):
-        # x: (batch, seq_len) avec le padding_idx défini dans l'embedding
-        pad_idx = self.embedding.padding_idx
-        # longueurs réelles (nb de tokens ≠ PAD) ; pack() exige des longueurs sur CPU
-        lengths = (x != pad_idx).sum(dim=1).to("cpu").clamp_min(1)
+        x = self.embedding(x)                 # [B, T, E]
+        out, _ = self.lstm(x)                 # [B, T, H*dir]
+        h_last = out[:, -1, :]                # last time step
+        z = self.dropout(h_last)
+        logits = self.fc(z).squeeze(1)        # [B]
+        return logits
 
-        emb = self.embedding(x)  # (B, T, E)
+# ---------- Git tags for MLflow ----------
+def git_info():
+    def _git(args):
+        try: return subprocess.check_output(["git"]+args, text=True).strip()
+        except Exception: return None
+    return {
+        "git.commit": _git(["rev-parse", "--short", "HEAD"]),
+        "git.branch": _git(["rev-parse", "--abbrev-ref", "HEAD"]),
+        "git.remote": _git(["config", "--get", "remote.origin.url"]),
+    }
 
-        # On "packe" les séquences pour que le LSTM ignore les pas de PAD
-        packed = nn.utils.rnn.pack_padded_sequence(
-            emb, lengths, batch_first=True, enforce_sorted=False
-        )
-        packed_out, (h_n, c_n) = self.lstm(packed)
-        # h_n: (num_layers * num_directions, B, H)
-
-        # On prend l'état final de la dernière couche (concat des 2 directions si bidirectionnel)
-        if self.lstm.bidirectional:
-            feat = torch.cat([h_n[-2], h_n[-1]], dim=1)  # (B, 2H)
-        else:
-            feat = h_n[-1]  # (B, H)
-
-        feat = self.dropout(feat)
-        logits = self.fc(feat).squeeze(-1)  # (B,)
-        return logits  # BCEWithLogitsLoss attend des logits (pas une sigmoïde)
-
-# -----------------------
-# Confusion matrix plot
-# -----------------------
-def log_confusion_png(y_true, y_prob, out_png):
-    y_pred = (y_prob >= 0.5).astype(int)
-    cm = confusion_matrix(y_true, y_pred)
-    fig, ax = plt.subplots(figsize=(4, 4), dpi=120)
-    im = ax.imshow(cm, interpolation="nearest")
-    ax.figure.colorbar(im, ax=ax)
-    classes = ["negatif", "positif"]
-    ax.set(xticks=np.arange(2), yticks=np.arange(2),
-           xticklabels=classes, yticklabels=classes,
-           ylabel="Vrai", xlabel="Prédit", title="Matrice de confusion")
-    thresh = cm.max() / 2.
-    for i in range(2):
-        for j in range(2):
-            ax.text(j, i, str(cm[i, j]),
-                    ha="center", va="center",
-                    color="white" if cm[i, j] > thresh else "black")
-    plt.tight_layout()
-    plt.savefig(out_png, bbox_inches="tight")
-    plt.close(fig)
-    mlflow.log_artifact(out_png)
-
-
-# -----------------------
-# Train / Eval
-# -----------------------
-def train_one_epoch(model, loader, optim, criterion, device):
-    model.train()
+# ---------- Train / Eval ----------
+def run_epoch(model, loader, criterion, optimizer=None, device=None):
+    is_train = optimizer is not None
+    model.train() if is_train else model.eval()
     losses, preds, labels = [], [], []
-    for x, y in loader:
-        x = x.to(device)
-        y = y.to(device)
-        optim.zero_grad()
-        logits = model(x)
-        loss = criterion(logits, y)
-        loss.backward()
-        optim.step()
+
+    for Xb, yb in loader:
+        Xb = Xb.to(device)
+        yb = yb.to(device)
+
+        logits = model(Xb)
+        loss = criterion(logits, yb)
+        if is_train:
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+
         losses.append(loss.item())
-        preds.extend((torch.sigmoid(logits) >= 0.5).long().cpu().numpy())
-        labels.extend(y.long().cpu().numpy())
-    f1 = f1_score(labels, preds, average="macro")
-    acc = accuracy_score(labels, preds)
-    return float(np.mean(losses)), float(f1), float(acc)
+        probs = torch.sigmoid(logits)
+        pred = (probs >= 0.5).long().cpu().numpy()
+        preds.extend(pred)
+        labels.extend(yb.long().cpu().numpy())
 
-@torch.no_grad()
-def eval_epoch(model, loader, criterion, device):
-    model.eval()
-    losses, preds, labels, probs = [], [], [], []
-    for x, y in loader:
-        x = x.to(device)
-        y = y.to(device)
-        logits = model(x)
-        loss = criterion(logits, y)
-        p = torch.sigmoid(logits)
-        losses.append(loss.item())
-        preds.extend((p >= 0.5).long().cpu().numpy())
-        labels.extend(y.long().cpu().numpy())
-        probs.extend(p.cpu().numpy())
-    f1 = f1_score(labels, preds, average="macro")
-    acc = accuracy_score(labels, preds)
-    return float(np.mean(losses)), float(f1), float(acc), np.asarray(labels), np.asarray(probs).ravel()
+    preds = np.array(preds); labels = np.array(labels)
+    acc = (preds == labels).mean()
+    # F1 macro binaire
+    tp = ((preds==1)&(labels==1)).sum()
+    fp = ((preds==1)&(labels==0)).sum()
+    fn = ((preds==0)&(labels==1)).sum()
+    tn = ((preds==0)&(labels==0)).sum()
+    def f1(p, r):
+        return 2*p*r/(p+r) if (p+r)>0 else 0.0
+    # classe 0
+    p0 = tn/ (tn+fn) if (tn+fn)>0 else 0.0
+    r0 = tn/ (tn+fp) if (tn+fp)>0 else 0.0
+    f10 = f1(p0, r0)
+    # classe 1
+    p1 = tp/ (tp+fp) if (tp+fp)>0 else 0.0
+    r1 = tp/ (tp+fn) if (tp+fn)>0 else 0.0
+    f11 = f1(p1, r1)
+    f1m = (f10+f11)/2
+    return float(np.mean(losses)), float(f1m), float(acc)
 
-
-# -----------------------
-# Main
-# -----------------------
+# ---------- Main ----------
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data", type=str, required=True)
-    parser.add_argument("--subset_rows", type=int, default=200000)
-    parser.add_argument("--embedding_path", type=str, required=True,
-                        help="Chemin du GloVe (ex: glove.twitter.27B.200d.txt)")
-    parser.add_argument("--embedding_dim", type=int, default=200)
-    parser.add_argument("--max_tokens", type=int, default=80000)
-    parser.add_argument("--seq_len", type=int, default=80)
-    parser.add_argument("--epochs", type=int, default=6)
-    parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--bidirectional", action="store_true")
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--freeze_embed_epochs", type=int, default=2,
-                        help="Nb d'epochs avec embeddings gelés avant de les dégeler")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description="LSTM (PyTorch, MPS-friendly) + GloVe + MLflow")
+    ap.add_argument("--data", type=str, required=True)
+    ap.add_argument("--subset_rows", type=int, default=20000)
+    ap.add_argument("--embedding_path", type=str, required=True)
+    ap.add_argument("--embedding_dim", type=int, required=True)
+    ap.add_argument("--max_tokens", type=int, default=60000)
+    ap.add_argument("--seq_len", type=int, default=80)
+    ap.add_argument("--epochs", type=int, default=3)
+    ap.add_argument("--batch_size", type=int, default=256)
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--bidirectional", action="store_true")
+    ap.add_argument("--freeze_embed_epochs", type=int, default=1)
+    ap.add_argument("--experiment", type=str, default="lstm_embeddings_torch")
+    ap.add_argument("--seed", type=int, default=42)
+    args = ap.parse_args()
 
-    mlflow.set_experiment("lstm_embeddings_torch")
-
-    # Device (MPS Apple si dispo)
-    device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+    set_seed(args.seed)
+    device = get_device()
     print("Device:", device)
 
-    # 1) Données
-    cols = ["target","ids","date","flag","user","text"]
-    df = pd.read_csv(args.data, header=None, names=cols, encoding="ISO-8859-1")
-    df["label"] = df["target"].map({0:0, 4:1})
-    df = df[["text","label"]].dropna()
+    # (Optionnel) améliore la précision matmul (utile MPS)
+    try:
+        torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
+
+    # ---------- Data
     if args.subset_rows:
-        df = df.sample(n=args.subset_rows, random_state=42)
-    df["text_clean"] = df["text"].astype(str).apply(normalize_text)
+        df = load_balanced_subset_csv(args.data, per_class=args.subset_rows//2, chunksize=100_000, seed=args.seed)
+    else:
+        df = pd.read_csv(args.data, on_bad_lines="skip", **READ_KW)
+        # Mapping cohérent: 0 = négatif, 1 = positif
+        df["label"] = df["target"].map({0:0, 4:1}).astype(int)
+        df = df[["text","label"]].sample(frac=1.0, random_state=args.seed)
 
-    from sklearn.model_selection import train_test_split
-    X_train, X_val, y_train, y_val = train_test_split(
-        df["text_clean"], df["label"].astype(int),
-        test_size=0.2, random_state=42, stratify=df["label"]
-    )
+    df["text"] = df["text"].astype(str).apply(normalize_light)
+    # split
+    n = len(df); n_val = int(0.2*n)
+    df_train = df.iloc[:-n_val]; df_val = df.iloc[-n_val:]
 
-    # 2) Vocab
-    stoi, itos = build_vocab(X_train, max_tokens=args.max_tokens, min_freq=1)
-    print(f"Vocab size: {len(stoi)}")
-    # 3) Embedding matrix
-    emb_matrix, found = load_glove_matrix(args.embedding_path, args.embedding_dim, stoi)
-    print(f"Found {found} words in {os.path.basename(args.embedding_path)}")
+    # ---------- Vocab & vectorize
+    vocab, stoi = build_vocab(df_train["text"].tolist(), max_tokens=args.max_tokens, min_freq=1)
+    Xtr = texts_to_ids(df_train["text"].tolist(), stoi, args.seq_len)
+    Xva = texts_to_ids(df_val["text"].tolist(),   stoi, args.seq_len)
+    ytr = df_train["label"].astype(int).values
+    yva = df_val["label"].astype(int).values
 
-    # 4) Dataset/Loader
-    tr_ds = SeqDataset(X_train, y_train.values, stoi, args.seq_len)
-    va_ds = SeqDataset(X_val, y_val.values, stoi, args.seq_len)
-    tr_loader = DataLoader(tr_ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
-    va_loader = DataLoader(va_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
+    # ---------- Embeddings
+    emb_matrix, found = load_glove_txt(args.embedding_path, args.embedding_dim, vocab)
+    print(f"Vocab size: {len(vocab)} | Found {found} embeddings from {os.path.basename(args.embedding_path)}")
 
-    # 5) Modèle
-    model = LSTMSentiment(
-        vocab_size=len(stoi),
-        embedding_dim=args.embedding_dim,
-        hidden_size=128,
-        bidirectional=args.bidirectional,
-        dropout=0.4,
-        pad_idx=stoi[PAD_TOKEN],
+    # ---------- Datasets / Loaders
+    train_ds = SeqDataset(Xtr, ytr)
+    val_ds   = SeqDataset(Xva, yva)
+
+    # pin_memory = False sur MPS; True sur CUDA
+    pin_mem = (device.type == "cuda")
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                              num_workers=0, pin_memory=pin_mem)
+    val_loader   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
+                              num_workers=0, pin_memory=pin_mem)
+
+    # ---------- Model
+    model = LSTMClassifier(
         embedding_matrix=emb_matrix,
-        freeze_embed=True  # d'abord gelé
+        hidden=128,
+        bidirectional=args.bidirectional,
+        dropout=0.3,
+        freeze_embed_epochs=args.freeze_embed_epochs
     ).to(device)
 
     criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
-    with mlflow.start_run(run_name=f"LSTM_torch_glove_{args.embedding_dim}d"):
+    # ---------- MLflow
+    mlflow.set_tracking_uri("file:./mlruns")
+    mlflow.set_experiment(args.experiment)
+    with mlflow.start_run(run_name=f"lstm_torch_glove_{args.embedding_dim}d"):
+        run_id = mlflow.active_run().info.run_id
+        model_dir = os.path.join("models", "lstm_torch", run_id)
+        os.makedirs(model_dir, exist_ok=True)
+        # tags git
+        for k, v in git_info().items():
+            if v: mlflow.set_tag(k, v)
+
         mlflow.log_params({
-            "subset_rows": args.subset_rows,
-            "embedding_dim": args.embedding_dim,
-            "max_tokens": args.max_tokens,
-            "seq_len": args.seq_len,
-            "epochs": args.epochs,
-            "batch_size": args.batch_size,
-            "bidirectional": args.bidirectional,
-            "lr": args.lr,
-            "freeze_embed_epochs": args.freeze_embed_epochs,
-            "embedding_path": args.embedding_path
+            **vars(args),
+            "device": str(device),
+            "vocab_size": len(vocab),
+            "loss": "BCEWithLogitsLoss",
+            "optimizer": "AdamW",
         })
 
-        start = time.time()
-        for epoch in range(1, args.epochs + 1):
-            # dégel des embeddings après n epochs
-            if epoch == args.freeze_embed_epochs + 1:
-                model.embedding.weight.requires_grad = True
-                # baisse du LR quand on fine-tune l'embedding
-                for g in optimizer.param_groups:
-                    g["lr"] = args.lr * 0.5
+        t0 = time.perf_counter()
+        best_f1 = -1.0
 
-            tr_loss, tr_f1, tr_acc = train_one_epoch(model, tr_loader, optimizer, criterion, device)
-            va_loss, va_f1, va_acc, y_true, y_prob = eval_epoch(model, va_loader, criterion, device)
+        for epoch in range(1, args.epochs+1):
+            # (dé)gèle l’embedding après N epochs
+            if epoch == args.freeze_embed_epochs + 1:
+                model.unfreeze_embedding()
+
+            tr_loss, tr_f1, tr_acc = run_epoch(model, train_loader, criterion, optimizer, device)
+            va_loss, va_f1, va_acc = run_epoch(model, val_loader, criterion, None, device)
 
             print(f"Epoch {epoch}/{args.epochs} | "
                   f"Train loss {tr_loss:.4f} f1 {tr_f1:.4f} acc {tr_acc:.4f} | "
@@ -324,30 +312,15 @@ def main():
                 "val_loss": va_loss, "val_f1": va_f1, "val_acc": va_acc
             }, step=epoch)
 
-        dur = time.time() - start
-        mlflow.log_metric("duration", float(dur))
+            if va_f1 > best_f1:
+                best_f1 = va_f1
+                torch.save(model.state_dict(), os.path.join(model_dir, "best.pt"))
 
-        # Artifacts : matrice de confusion + rapport
-        os.makedirs("artifacts", exist_ok=True)
-        cm_png = "artifacts/lstm_torch_confusion.png"
-        log_confusion_png(y_true, y_prob, cm_png)
-        mlflow.log_text(
-            classification_report(y_true, (y_prob>=0.5).astype(int), digits=3),
-            "artifacts/lstm_torch_classification_report.txt"
-        )
+        mlflow.log_artifacts(model_dir, artifact_path="model")
 
-        # Sauvegarde du modèle
-        save_dir = "models/lstm_torch"
-        os.makedirs(save_dir, exist_ok=True)
-        model_path = os.path.join(save_dir, "lstm_torch.pt")
-        torch.save({"state_dict": model.state_dict(),
-                    "stoi": stoi,
-                    "seq_len": args.seq_len,
-                    "embedding_dim": args.embedding_dim}, model_path)
-        mlflow.log_artifact(model_path)
-
-        print(f"✅ LSTM (PyTorch) — F1_macro: {va_f1:.4f} | acc: {va_acc:.4f} | dur: {dur:.1f}s")
-
+        dur = time.perf_counter() - t0
+        mlflow.log_metric("duration_sec", float(dur))
+        print(f"✅ LSTM (PyTorch/MPS) — best Val F1_macro: {best_f1:.4f} | dur: {dur:.1f}s")
 
 if __name__ == "__main__":
     main()

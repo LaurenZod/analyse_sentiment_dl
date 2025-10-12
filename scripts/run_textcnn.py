@@ -3,6 +3,10 @@ import os, re, time, argparse, subprocess, io
 import numpy as np
 import pandas as pd
 import mlflow, mlflow.tensorflow
+
+# Use Agg backend for matplotlib before importing pyplot
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow import keras
@@ -172,9 +176,12 @@ def log_plots(y_true, y_pred, y_score):
 # -------------- Main --------------
 def main():
     args = parse_args()
+    np.random.seed(args.random_state)
+    tf.random.set_seed(args.random_state)
+    os.environ["PYTHONHASHSEED"] = str(args.random_state)
     mlflow.set_tracking_uri("file:./mlruns")
     mlflow.set_experiment(args.experiment)
-    mlflow.tensorflow.autolog(silent=True)
+    mlflow.tensorflow.autolog(silent=True, log_models=False)
 
     # Data
     if args.subset_rows:
@@ -288,19 +295,15 @@ def main():
             mlflow.log_metric("accuracy_finetune", float(acc_ft))
 
         # Rapport + sauvegardes
-        rep = classification_report(y_test, y_pred, digits=3)
-        with open("classification_report.txt", "w") as f:
-            f.write(rep)
-        mlflow.log_artifact("classification_report.txt")
+        mlflow.log_text(classification_report(y_test, y_pred, digits=3), "classification_report.txt")
 
         os.makedirs("models/textcnn", exist_ok=True)
         model.save("models/textcnn/model.keras", include_optimizer=False)
         model.export("models/textcnn/saved_model")
         with open("models/textcnn/vocab.txt", "w") as f:
             f.write("\n".join(vocab))
-        mlflow.log_artifact("models/textcnn/model.keras")
-        mlflow.log_artifact("models/textcnn/vocab.txt")
-        mlflow.log_artifacts("models/textcnn/saved_model")
+        # Log the entire folder once (contains model.keras, saved_model, vocab.txt)
+        mlflow.log_artifacts("models/textcnn")
 
         print(f"✅ TextCNN(opt) — F1_macro: {f1:.4f} | acc: {acc:.4f} | dur: {dur:.1f}s")
 

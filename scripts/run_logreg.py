@@ -4,6 +4,8 @@ matplotlib.use("Agg")
 import os, re, time, argparse, subprocess, joblib, random
 import numpy as np
 import pandas as pd
+from packaging import version
+from mlflow.models.signature import infer_signature
 import mlflow, mlflow.sklearn
 import matplotlib.pyplot as plt
 from scripts.utils_text import transform_bow
@@ -102,11 +104,11 @@ def main():
         df_full = df_full[["text","label"]].dropna()
 
         n = args.subset_rows // 2
-        # Sécurise si une classe a moins que n
-        n_neg = min(n, (df_full["label"] == 1).sum())
-        n_pos = min(n, (df_full["label"] == 0).sum())
-        df_neg = df_full[df_full["label"] == 1].sample(n=n_neg, random_state=args.random_state)
-        df_pos = df_full[df_full["label"] == 0].sample(n=n_pos, random_state=args.random_state)
+        # Sécurise si une classe a moins que n (label: 0 = négatif, 1 = positif)
+        n_neg = min(n, (df_full["label"] == 0).sum())
+        n_pos = min(n, (df_full["label"] == 1).sum())
+        df_neg = df_full[df_full["label"] == 0].sample(n=n_neg, random_state=args.random_state)
+        df_pos = df_full[df_full["label"] == 1].sample(n=n_pos, random_state=args.random_state)
         df = pd.concat([df_neg, df_pos]).sample(frac=1.0, random_state=args.random_state).reset_index(drop=True)
     else:
         df = pd.read_csv(args.data, **read_kwargs)
@@ -170,16 +172,35 @@ def main():
 
         plot_and_log_confusion(y_test, y_pred)
         report = classification_report(y_test, y_pred, digits=3)
-        with open("classification_report.txt", "w") as f:
-            f.write(report)
-        mlflow.log_artifact("classification_report.txt")
+        mlflow.log_text(report, "classification_report.txt")
 
         os.makedirs("models/baseline", exist_ok=True)
         out = "models/baseline/tfidf_logreg.joblib"
         joblib.dump({"vectorizer": vec, "model": clf}, out)
         mlflow.log_artifact(out)
 
-        mlflow.sklearn.log_model(clf, artifact_path="sk_model")
+        # Sauvegarde aussi au format MLflow (modèle seul)
+        from packaging import version
+        from mlflow.models.signature import infer_signature
+
+        input_example = Xtr[:3].toarray()
+        signature = infer_signature(Xtr[:10].toarray(),
+                                    clf.predict_proba(Xtr[:10])[:, 1])
+
+        if version.parse(mlflow.__version__) >= version.parse("3.4.0"):
+            mlflow.sklearn.log_model(
+                clf,
+                name="sk_model",
+                input_example=input_example,
+                signature=signature,
+            )
+        else:
+            mlflow.sklearn.log_model(
+                clf,
+                artifact_path="sk_model",
+                input_example=input_example,
+                signature=signature,
+            )
 
         print(f"✅ F1_macro: {f1:.4f} | accuracy: {acc:.4f} | duration_sec: {dur:.2f}")
 

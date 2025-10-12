@@ -16,7 +16,7 @@ import mlflow
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
     f1_score, accuracy_score, classification_report,
-    ConfusionMatrixDisplay
+    ConfusionMatrixDisplay, roc_curve, auc   # <-- ajout ROC/AUC
 )
 
 import torch
@@ -120,8 +120,9 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, max_grad_norm=1
 
 @torch.no_grad()
 def eval_epoch(model, dataloader, device):
+    """Retourne aussi les probabilités de la classe 1 pour ROC/AUC."""
     model.eval()
-    losses, preds, labels = [], [], []
+    losses, preds, labels, scores = [], [], [], []
 
     for batch in dataloader:
         input_ids = batch["input_ids"].to(device)
@@ -132,12 +133,15 @@ def eval_epoch(model, dataloader, device):
         loss, logits = out.loss, out.logits
 
         losses.append(loss.item())
-        preds.extend(torch.argmax(logits, dim=1).detach().cpu().numpy())
-        labels.extend(y.detach().cpu().numpy())
+        probs = torch.softmax(logits, dim=1)[:, 1]  # P(classe=1)
+        scores.extend(probs.detach().cpu().numpy().tolist())
+        preds.extend(torch.argmax(logits, dim=1).detach().cpu().numpy().tolist())
+        labels.extend(y.detach().cpu().numpy().tolist())
 
     y_true = np.array(labels)
     y_pred = np.array(preds)
-    return np.mean(losses), f1_score(y_true, y_pred, average="macro"), accuracy_score(y_true, y_pred), y_true, y_pred
+    y_scores = np.array(scores)
+    return np.mean(losses), f1_score(y_true, y_pred, average="macro"), accuracy_score(y_true, y_pred), y_true, y_pred, y_scores
 
 
 # ----------------------
@@ -216,15 +220,18 @@ def main():
         start = time.time()
 
         best_val_f1 = -1.0
-        best_path = f"models/{args.model_name.replace('/', '_')}"
+        best_path = os.path.join("models", "bert", args.model_name.replace("/", "_"))
         os.makedirs(best_path, exist_ok=True)
+        artifacts_dir = os.path.join("artifacts", "bert")
+        os.makedirs(artifacts_dir, exist_ok=True)
 
-        last_y_true, last_y_pred = None, None
+        last_y_true, last_y_pred, last_y_scores = None, None, None
 
         for epoch in range(args.epochs):
             tr_loss, tr_f1, tr_acc = train_epoch(model, train_loader, optimizer, scheduler, device)
-            val_loss, val_f1, val_acc, y_true, y_pred = eval_epoch(model, val_loader, device)
-            last_y_true, last_y_pred = y_true, y_pred
+            val_out = eval_epoch(model, val_loader, device)
+            val_loss, val_f1, val_acc, y_true, y_pred, y_scores = val_out
+            last_y_true, last_y_pred, last_y_scores = y_true, y_pred, y_scores
 
             print(f"Epoch {epoch+1}/{args.epochs} | "
                   f"Train loss {tr_loss:.4f} f1 {tr_f1:.4f} acc {tr_acc:.4f} | "
@@ -240,26 +247,44 @@ def main():
                 best_val_f1 = val_f1
                 model.save_pretrained(best_path)
                 tokenizer.save_pretrained(best_path)
-                # log uniquement le répertoire une seule fois (si tu veux éviter les multiples copies, déplace ce log hors de la boucle)
-                mlflow.log_artifacts(best_path)
+                
+        mlflow.log_artifacts(best_path, artifact_path="model")
 
         dur = time.time() - start
         mlflow.log_metric("duration", dur)
 
-        # Artefacts : confusion matrix + classification report (sur la dernière éval)
+        # Artefacts : confusion matrix + classification report + ROC (sur la dernière éval)
         if last_y_true is not None and last_y_pred is not None:
+            # Confusion
             fig, ax = plt.subplots()
             ConfusionMatrixDisplay.from_predictions(last_y_true, last_y_pred, ax=ax)
             buf = io.BytesIO()
             fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
             plt.close(fig)
-            with open("confusion_val.png", "wb") as f:
+            conf_path = os.path.join(artifacts_dir, "confusion_val.png")
+            with open(conf_path, "wb") as f:
                 f.write(buf.getvalue())
-            mlflow.log_artifact("confusion_val.png")
 
-            with open("classification_report.txt", "w") as f:
+            # Report
+            report_path = os.path.join(artifacts_dir, "classification_report.txt")
+            with open(report_path, "w") as f:
                 f.write(classification_report(last_y_true, last_y_pred, digits=4))
-            mlflow.log_artifact("classification_report.txt")
+
+            # ROC + AUC (proba classe 1)
+            if last_y_scores is not None:
+                fpr, tpr, _ = roc_curve(last_y_true, last_y_scores)
+                roc_auc = auc(fpr, tpr)
+                mlflow.log_metric("auc", float(roc_auc))
+
+                fig = plt.figure()
+                plt.plot(fpr, tpr, linewidth=2, label=f"AUC = {roc_auc:.3f}")
+                plt.plot([0, 1], [0, 1], "--")
+                plt.xlabel("FPR"); plt.ylabel("TPR"); plt.title("ROC curve"); plt.legend()
+                roc_path = os.path.join(artifacts_dir, "roc_curve.png")
+                fig.savefig(roc_path, dpi=160, bbox_inches="tight")
+                plt.close(fig)
+
+            mlflow.log_artifacts(artifacts_dir, artifact_path="eval_artifacts")
 
         print(f"✅ {args.model_name} — best Val F1_macro: {best_val_f1:.4f} | dur: {dur:.1f}s")
 
