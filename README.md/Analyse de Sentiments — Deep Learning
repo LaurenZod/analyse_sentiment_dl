@@ -1,0 +1,131 @@
+🧠 Analyse de Sentiments — Deep Learning
+
+Ce projet explore plusieurs approches de classification de sentiments sur le jeu de données Sentiment140 (Twitter).
+L’objectif est de comparer des modèles traditionnels (TF-IDF + Régression Logistique) et des modèles neuronaux modernes (TextCNN, LSTM, BERT fine-tuné).
+
+📁 Structure du projet
+
+Realisez_une_analyse_de_sentiments_deep_learning_potelet_laurent/
+│
+├── data/                    # Dossier local des données (non versionné)
+├── models/                  # Modèles sauvegardés (non versionné)
+├── mlruns/                  # Suivi des expériences MLflow (non versionné)
+│
+├── scripts/
+│   ├── run_tfidf_lr.py      # Baseline TF-IDF + LogisticRegression
+│   ├── run_textcnn.py       # CNN 1D sur embeddings
+│   ├── run_lstm_torch.py    # LSTM bidirectionnel PyTorch
+│   ├── run_bert.py          # Fine-tuning DistilBERT
+│   └── maintenance/
+│       └── nettoyage_mlflow.py  # Script de nettoyage MLflow
+│
+├── requirements.txt
+├── .gitignore
+└── README.md
+
+⚙️ Installation
+
+1️⃣ Créer et activer un environnement virtuel
+python -m venv .venv_p7
+source .venv_p7/bin/activate      # macOS / Linux
+# ou sur Windows :
+# .venv_p7\Scripts\activate
+
+2️⃣ Installer les dépendances
+pip install -r requirements.txt
+
+3️⃣ (Optionnel) Vérifier PyTorch et accélération
+python - <<'PY'
+import torch
+print("Torch:", torch.__version__, "| MPS dispo:", torch.backends.mps.is_available())
+PY
+
+🧾 Données
+
+Le dataset Sentiment140 contient 1,6 million de tweets annotés :
+	•	0 → négatif
+	•	4 → positif
+
+Téléchargement manuel :
+https://www.kaggle.com/datasets/kazanova/sentiment140
+
+Place le fichier dans ./data/training.1600000.processed.noemoticon.csv
+
+🚀 Lancement des modèles
+
+Baseline TF-IDF + Logistic Regression
+python -m scripts.run_tfidf_lr \
+  --data "./data/training.1600000.processed.noemoticon.csv" \
+  --subset_rows 10000 \
+  --exp_name "baseline_tfidf_lr"
+
+TextCNN (PyTorch)
+python -m scripts.run_textcnn \
+  --data "./data/training.1600000.processed.noemoticon.csv" \
+  --subset_rows 50000 \
+  --epochs 5 --batch_size 64 \
+  --exp_name "textcnn_full_ft"
+
+LSTM bidirectionnel
+python -m scripts.run_lstm_torch \
+  --data "./data/training.1600000.processed.noemoticon.csv" \
+  --subset_rows 50000 \
+  --epochs 5 --batch_size 64 \
+  --exp_name "lstm_full"
+
+BERT (DistilBERT fine-tuned)
+TRANSFORMERS_NO_TF=1 TOKENIZERS_PARALLELISM=false \
+python -m scripts.run_bert \
+  --data "./data/training.1600000.processed.noemoticon.csv" \
+  --subset_rows 100000 \
+  --model_name "distilbert-base-uncased" \
+  --epochs 3 --batch_size 48 --max_length 128 --lr 3e-5 \
+  --early_stop_patience 1 \
+  --exp_name "bert_finetune_distilbert"
+
+📊 Suivi avec MLflow
+mlflow ui --backend-store-uri file:./mlruns --port 5000
+
+Puis ouvrir :
+http://127.0.0.1:5000
+
+
+🧮 Métriques suivies
+
+Nom dans MLflow         Description
+train_loss              Moyenne des pertes sur l’entraînement
+val_loss                Moyenne des pertes sur la validation
+train_f1, val_f1        F1-macro score (moyenne équilibrée)
+train_acc, val_acc      Précision globale
+duration                Temps total d’exécution
+best_val_f1             Meilleur F1 atteint (checkpoint sauvegardé)
+
+🧹 Maintenance
+tar -czf backup_mlruns_$(date +%F_%H%M).tar.gz mlruns
+
+Nettoyer les vieilles runs # Si besoin
+python -m scripts.maintenance.nettoyage_mlflow \
+  --experiment "textcnn_full_ft" \                  # Renseigner le nom de l'expérimentation à nettoyer
+  --metric val_f1_macro --top_k 3                   # Changer le nom de la métrique d'évaluation
+
+
+
+📈 Résumé des performances (approximatives)
+
+Modèle                  F1_macro (Val)       Durée (≈)
+TF-IDF + LogReg         0.78                 1 min
+TextCNN                 0.83–0.84            5–10 min
+LSTM bidirectionnel     0.79–0.80            10–15 min
+DistilBERT fine-tuned   0.84–0.85            ~1 h
+
+
+🧩 Améliorations possibles
+	•	Optimisation des hyperparamètres
+	•	Test de modèles roberta-base, bertweet-base
+	•	Visualisation des embeddings
+	•	Sauvegarde automatique des meilleurs checkpoints
+
+
+👤 Auteur
+
+Laurent Potelet
