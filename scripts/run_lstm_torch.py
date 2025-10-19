@@ -5,10 +5,12 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 import mlflow
+import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+from sklearn.metrics import roc_curve, auc, ConfusionMatrixDisplay
 
 # ---------- Utils device / seed ----------
 def get_device():
@@ -167,11 +169,31 @@ def git_info():
         "git.remote": _git(["config", "--get", "remote.origin.url"]),
     }
 
+def log_confusion_and_roc(y_true, y_prob):
+    # Confusion matrix (threshold 0.5)
+    y_pred = (np.array(y_prob) >= 0.5).astype(int)
+    fig, ax = plt.subplots()
+    ConfusionMatrixDisplay.from_predictions(y_true, y_pred, ax=ax)
+    mlflow.log_figure(fig, "confusion_matrix.png")
+    plt.close(fig)
+
+    # ROC
+    fpr, tpr, _ = roc_curve(y_true, y_prob)
+    roc_auc = auc(fpr, tpr)
+    mlflow.log_metric("auc", float(roc_auc))
+    fig = plt.figure()
+    plt.plot(fpr, tpr, linewidth=2)
+    plt.plot([0,1],[0,1], "--")
+    plt.xlabel("FPR"); plt.ylabel("TPR"); plt.title(f"ROC (AUC={roc_auc:.3f})")
+    mlflow.log_figure(fig, "roc_curve.png")
+    plt.close(fig)
+
 # ---------- Train / Eval ----------
-def run_epoch(model, loader, criterion, optimizer=None, device=None):
+def run_epoch(model, loader, criterion, optimizer=None, device=None, return_scores=False):
     is_train = optimizer is not None
     model.train() if is_train else model.eval()
     losses, preds, labels = [], [], []
+    scores = [] if return_scores else None
 
     for Xb, yb in loader:
         Xb = Xb.to(device)
@@ -188,8 +210,13 @@ def run_epoch(model, loader, criterion, optimizer=None, device=None):
         losses.append(loss.item())
         probs = torch.sigmoid(logits)
         pred = (probs >= 0.5).long().cpu().numpy()
+        if return_scores:
+            # store raw probabilities for ROC
+            scores_batch = probs.cpu().numpy().ravel().tolist()
         preds.extend(pred)
         labels.extend(yb.long().cpu().numpy())
+        if return_scores:
+            scores.extend(scores_batch)
 
     preds = np.array(preds); labels = np.array(labels)
     acc = (preds == labels).mean()
@@ -209,6 +236,8 @@ def run_epoch(model, loader, criterion, optimizer=None, device=None):
     r1 = tp/ (tp+fn) if (tp+fn)>0 else 0.0
     f11 = f1(p1, r1)
     f1m = (f10+f11)/2
+    if return_scores:
+        return float(np.mean(losses)), float(f1m), float(acc), labels.tolist(), scores
     return float(np.mean(losses)), float(f1m), float(acc)
 
 # ---------- Main ----------
@@ -319,7 +348,7 @@ def main():
                 model.unfreeze_embedding()
 
             tr_loss, tr_f1, tr_acc = run_epoch(model, train_loader, criterion, optimizer, device)
-            va_loss, va_f1, va_acc = run_epoch(model, val_loader, criterion, None, device)
+            va_loss, va_f1, va_acc, y_true, y_prob = run_epoch(model, val_loader, criterion, None, device, return_scores=True)
 
             print(f"Epoch {epoch}/{args.epochs} | "
                   f"Train loss {tr_loss:.4f} f1 {tr_f1:.4f} acc {tr_acc:.4f} | "
@@ -329,6 +358,10 @@ def main():
                 "train_loss": tr_loss, "train_f1": tr_f1, "train_acc": tr_acc,
                 "val_loss": va_loss, "val_f1": va_f1, "val_acc": va_acc
             }, step=epoch)
+
+            if epoch == 1 or va_f1 >= best_f1:
+                # log diagnostic plots for the current best (or first epoch)
+                log_confusion_and_roc(y_true, y_prob)
 
             if va_f1 > best_f1:
                 best_f1 = va_f1

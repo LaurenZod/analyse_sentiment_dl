@@ -180,8 +180,6 @@ def main():
         mlflow.log_artifact(out)
 
         # Sauvegarde aussi au format MLflow (modèle seul)
-        from packaging import version
-        from mlflow.models.signature import infer_signature
 
         input_example = Xtr[:3].toarray()
         signature = infer_signature(Xtr[:10].toarray(),

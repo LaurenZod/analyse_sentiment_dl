@@ -214,6 +214,7 @@ def main():
 
     best_val_f1 = -1.0
     no_improve = 0
+    best_epoch = -1
 
     with mlflow.start_run(run_name=f"{args.model_name}_finetune"):
         mlflow.log_params({
@@ -224,11 +225,8 @@ def main():
         })
         start = time.time()
 
-        best_epoch = -1
         best_path = os.path.join("models", "bert", args.model_name.replace("/", "_"))
         os.makedirs(best_path, exist_ok=True)
-        artifacts_dir = os.path.join("artifacts", "bert")
-        os.makedirs(artifacts_dir, exist_ok=True)
 
         last_y_true, last_y_pred, last_y_scores = None, None, None
 
@@ -247,9 +245,10 @@ def main():
                 "val_loss": val_loss, "val_f1": val_f1, "val_acc": val_acc
             }, step=epoch+1)
 
-            if val_f1 > best_val_f1 + 1e-4:   # petit epsilon pour éviter les micro-variations
+            if val_f1 > best_val_f1 + 1e-4:   
                 best_val_f1 = val_f1
                 no_improve = 0
+                best_epoch = epoch + 1
                 model.save_pretrained(best_path)
                 tokenizer.save_pretrained(best_path)
             else:
@@ -258,7 +257,6 @@ def main():
                     print(f"Early stopping (patience={args.early_stop_patience}). Best val_f1={best_val_f1:.4f}")
                     break
 
-        mlflow.log_artifacts(best_path, artifact_path="model")
 
         dur = time.time() - start
         mlflow.log_metric("duration", dur)
@@ -267,22 +265,17 @@ def main():
 
         # Artefacts : confusion matrix + classification report + ROC (sur la dernière éval)
         if last_y_true is not None and last_y_pred is not None:
-            # Confusion
+            # Confusion matrix figure -> directly to MLflow
             fig, ax = plt.subplots()
             ConfusionMatrixDisplay.from_predictions(last_y_true, last_y_pred, ax=ax)
-            buf = io.BytesIO()
-            fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
+            mlflow.log_figure(fig, "confusion_val.png")
             plt.close(fig)
-            conf_path = os.path.join(artifacts_dir, "confusion_val.png")
-            with open(conf_path, "wb") as f:
-                f.write(buf.getvalue())
 
-            # Report
-            report_path = os.path.join(artifacts_dir, "classification_report.txt")
-            with open(report_path, "w") as f:
-                f.write(classification_report(last_y_true, last_y_pred, digits=4))
+            # Classification report -> directly as text artifact
+            rep_txt = classification_report(last_y_true, last_y_pred, digits=4)
+            mlflow.log_text(rep_txt, "classification_report.txt")
 
-            # ROC + AUC (proba classe 1)
+            # ROC + AUC (needs probability scores)
             if last_y_scores is not None:
                 fpr, tpr, _ = roc_curve(last_y_true, last_y_scores)
                 roc_auc = auc(fpr, tpr)
@@ -292,11 +285,8 @@ def main():
                 plt.plot(fpr, tpr, linewidth=2, label=f"AUC = {roc_auc:.3f}")
                 plt.plot([0, 1], [0, 1], "--")
                 plt.xlabel("FPR"); plt.ylabel("TPR"); plt.title("ROC curve"); plt.legend()
-                roc_path = os.path.join(artifacts_dir, "roc_curve.png")
-                fig.savefig(roc_path, dpi=160, bbox_inches="tight")
+                mlflow.log_figure(fig, "roc_curve.png")
                 plt.close(fig)
-
-            mlflow.log_artifacts(artifacts_dir, artifact_path="eval_artifacts")
 
         print(f"✅ {args.model_name} — best val_f1: {best_val_f1:.4f} | dur: {dur:.1f}s")
 
