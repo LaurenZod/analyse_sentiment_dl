@@ -157,6 +157,8 @@ def main():
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--max_length", type=int, default=128)
     parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--weight_decay", type=float, default=0.01)
+    parser.add_argument("--early_stop_patience", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--exp_name", type=str, default="bert_finetune")
     args = parser.parse_args()
@@ -205,7 +207,7 @@ def main():
     total_steps = len(train_loader) * args.epochs
     warmup_steps = max(1, int(0.1 * total_steps))
 
-    optimizer = AdamW(model.parameters(), lr=args.lr)
+    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
     )
@@ -220,6 +222,8 @@ def main():
         start = time.time()
 
         best_val_f1 = -1.0
+        best_epoch = -1
+        no_improve = 0
         best_path = os.path.join("models", "bert", args.model_name.replace("/", "_"))
         os.makedirs(best_path, exist_ok=True)
         artifacts_dir = os.path.join("artifacts", "bert")
@@ -242,16 +246,25 @@ def main():
                 "val_loss": val_loss, "val_f1": val_f1, "val_acc": val_acc
             }, step=epoch+1)
 
-            # Sauvegarde du meilleur modèle (selon F1 val)
-            if val_f1 > best_val_f1:
+            # Sauvegarde du meilleur modèle (selon F1 val) + early stopping
+            if val_f1 > best_val_f1 + 1e-6:
                 best_val_f1 = val_f1
+                best_epoch = epoch + 1
+                no_improve = 0
                 model.save_pretrained(best_path)
                 tokenizer.save_pretrained(best_path)
-                
+            else:
+                no_improve += 1
+                if no_improve >= args.early_stop_patience:
+                    print(f"Early stopping (no val_f1 improvement for {args.early_stop_patience} epochs).")
+                    break
+
         mlflow.log_artifacts(best_path, artifact_path="model")
 
         dur = time.time() - start
         mlflow.log_metric("duration", dur)
+        mlflow.log_metric("best_val_f1", float(best_val_f1))
+        mlflow.log_metric("best_epoch", int(best_epoch))
 
         # Artefacts : confusion matrix + classification report + ROC (sur la dernière éval)
         if last_y_true is not None and last_y_pred is not None:
@@ -286,7 +299,7 @@ def main():
 
             mlflow.log_artifacts(artifacts_dir, artifact_path="eval_artifacts")
 
-        print(f"✅ {args.model_name} — best Val F1_macro: {best_val_f1:.4f} | dur: {dur:.1f}s")
+        print(f"✅ {args.model_name} — best val_f1: {best_val_f1:.4f} | dur: {dur:.1f}s")
 
 
 if __name__ == "__main__":

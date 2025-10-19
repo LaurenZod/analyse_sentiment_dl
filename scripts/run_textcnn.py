@@ -4,6 +4,10 @@ import numpy as np
 import pandas as pd
 import mlflow, mlflow.tensorflow
 
+# --- Artifact/model directory constants ---
+ART_DIR = os.path.join("artifacts", "textcnn")
+MODEL_DIR = os.path.join(ART_DIR, "model")
+
 # Use Agg backend for matplotlib before importing pyplot
 import matplotlib
 matplotlib.use("Agg")
@@ -42,6 +46,8 @@ def parse_args():
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--batch_size", type=int, default=512)
     ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--early_stop_patience", type=int, default=2,
+                    help="patience (epochs) pour l'early stopping sur val_accuracy")
 
     # Fine-tuning embedding (optionnel si non-trainable au début)
     ap.add_argument("--ft_epochs", type=int, default=2)
@@ -247,9 +253,11 @@ def main():
 
         model = build_textcnn(vocab_size, args.seq_len, emb_matrix, args.trainable_embed,
                               args.filters, kernel_sizes, args.dropout, args.spatial_dropout, lr=args.lr)
+        os.makedirs(MODEL_DIR, exist_ok=True)
 
         cbs = [
-            keras.callbacks.EarlyStopping(monitor="val_accuracy", patience=3, restore_best_weights=True),
+            keras.callbacks.EarlyStopping(monitor="val_accuracy", patience=args.early_stop_patience, restore_best_weights=True),
+            keras.callbacks.ModelCheckpoint(os.path.join(MODEL_DIR, "best.keras"), monitor="val_accuracy", save_best_only=True),
             keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=2, min_lr=1e-5, verbose=1),
         ]
 
@@ -297,15 +305,15 @@ def main():
         # Rapport + sauvegardes
         mlflow.log_text(classification_report(y_test, y_pred, digits=3), "classification_report.txt")
 
-        os.makedirs("models/textcnn", exist_ok=True)
-        model.save("models/textcnn/model.keras", include_optimizer=False)
-        model.export("models/textcnn/saved_model")
-        with open("models/textcnn/vocab.txt", "w") as f:
+        os.makedirs(MODEL_DIR, exist_ok=True)
+        model.save(os.path.join(MODEL_DIR, "model.keras"), include_optimizer=False)
+        model.export(os.path.join(MODEL_DIR, "saved_model"))
+        with open(os.path.join(MODEL_DIR, "vocab.txt"), "w") as f:
             f.write("\n".join(vocab))
-        # Log the entire folder once (contains model.keras, saved_model, vocab.txt)
-        mlflow.log_artifacts("models/textcnn")
+        # Log the entire artifact folder once
+        mlflow.log_artifacts(ART_DIR)
 
-        print(f"✅ TextCNN(opt) — F1_macro: {f1:.4f} | acc: {acc:.4f} | dur: {dur:.1f}s")
+        print(f"✅ TextCNN(opt) — f1_macro: {f1:.4f} | accuracy: {acc:.4f} | dur: {dur:.1f}s")
 
 if __name__ == "__main__":
     main()

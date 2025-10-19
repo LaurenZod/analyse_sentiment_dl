@@ -135,11 +135,25 @@ class LSTMClassifier(nn.Module):
         self.embedding.weight.requires_grad = True
 
     def forward(self, x):
-        x = self.embedding(x)                 # [B, T, E]
-        out, _ = self.lstm(x)                 # [B, T, H*dir]
-        h_last = out[:, -1, :]                # last time step
-        z = self.dropout(h_last)
-        logits = self.fc(z).squeeze(1)        # [B]
+        # x: [B, T] with PAD id = 0
+        # Compute true sequence lengths (>=1)
+        with torch.no_grad():
+            lengths = (x != 0).sum(dim=1).clamp(min=1)
+        # Embed
+        x_emb = self.embedding(x)  # [B, T, E]
+        # Pack so LSTM ignores PAD tokens
+        packed = nn.utils.rnn.pack_padded_sequence(
+            x_emb, lengths.cpu(), batch_first=True, enforce_sorted=False
+        )
+        packed_out, (h, c) = self.lstm(packed)
+        # "h" already corresponds to the last valid timestep per sequence
+        if self.lstm.bidirectional:
+            # Concatenate last hidden states from both directions (last layer)
+            rep = torch.cat([h[-2], h[-1]], dim=1)  # [B, 2*H]
+        else:
+            rep = h[-1]  # [B, H]
+        z = self.dropout(rep)
+        logits = self.fc(z).squeeze(1)  # [B]
         return logits
 
 # ---------- Git tags for MLflow ----------
@@ -211,6 +225,7 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--bidirectional", action="store_true")
     ap.add_argument("--freeze_embed_epochs", type=int, default=1)
+    ap.add_argument("--early_stop_patience", type=int, default=1)
     ap.add_argument("--experiment", type=str, default="lstm_embeddings_torch")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
@@ -294,6 +309,9 @@ def main():
 
         t0 = time.perf_counter()
         best_f1 = -1.0
+        best_epoch = 0
+        patience = int(getattr(args, "early_stop_patience", 1))
+        stalled = 0
 
         for epoch in range(1, args.epochs+1):
             # (dé)gèle l’embedding après N epochs
@@ -314,9 +332,18 @@ def main():
 
             if va_f1 > best_f1:
                 best_f1 = va_f1
+                best_epoch = epoch
+                stalled = 0
                 torch.save(model.state_dict(), os.path.join(model_dir, "best.pt"))
+            else:
+                stalled += 1
+                if stalled >= patience:
+                    print(f"Early stopping triggered (no val_f1 improvement for {patience} epoch(s)). "
+                          f"Best at epoch {best_epoch} with val_f1={best_f1:.4f}")
+                    break
 
         mlflow.log_artifacts(model_dir, artifact_path="model")
+        mlflow.log_metric("best_epoch", float(best_epoch))
 
         dur = time.perf_counter() - t0
         mlflow.log_metric("duration_sec", float(dur))
