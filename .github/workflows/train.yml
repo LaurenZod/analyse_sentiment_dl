@@ -1,38 +1,262 @@
-name: Auto-train Models on Commit
+name: CI – Train changed models
 
 on:
   push:
     paths:
-      - 'scripts/*.py'      # déclenche si un script de modèle change
-    branches:
-      - main
+      - "scripts/run_bert.py"
+      - "scripts/run_lstm_torch.py"
+      - "scripts/run_textcnn.py"
+      - "scripts/run_logreg.py"
+      - "requirements.txt"
+  workflow_dispatch: {}
 
 jobs:
-  train-models:
+  detect-changes:
     runs-on: ubuntu-latest
-
+    outputs:
+      bert:     ${{ steps.filter.outputs.bert }}
+      lstm:     ${{ steps.filter.outputs.lstm }}
+      textcnn:  ${{ steps.filter.outputs.textcnn }}
+      logreg:   ${{ steps.filter.outputs.logreg }}
+      common:   ${{ steps.filter.outputs.common }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            bert:
+              - 'scripts/run_bert.py'
+            lstm:
+              - 'scripts/run_lstm_torch.py'
+            textcnn:
+              - 'scripts/run_textcnn.py'
+            logreg:
+              - 'scripts/run_logreg.py'
+            common:
+              - 'requirements.txt'
+
+  # --------------------------
+  # BERT (DistilBERT)
+  # --------------------------
+  train-bert:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.bert == 'true' || needs.detect-changes.outputs.common == 'true'
+    runs-on: ubuntu-latest
+    env:
+      MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+      TRANSFORMERS_NO_TF: "1"
+      TOKENIZERS_PARALLELISM: "false"
+      DATA_CSV: data/training.csv
+      DATA_CSV_URL: ${{ secrets.DATA_CSV_URL }} # optionnel: URL vers un petit CSV d’échantillon
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install deps
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install -U pip
+          pip install -r requirements.txt
+          # accélère Transformers sur CPU
+          pip install accelerate
+
+      - name: Prepare dataset (download if missing)
+        run: |
+          mkdir -p data
+          if [ ! -f "$DATA_CSV" ]; then
+            if [ -n "$DATA_CSV_URL" ]; then
+              echo "Downloading dataset…"
+              curl -L "$DATA_CSV_URL" -o "$DATA_CSV"
+            else
+              echo "Dataset not found and DATA_CSV_URL not set. Skipping job."
+              echo "skip=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+
+      - name: Train (smoketest)
+        run: |
+          python -m scripts.run_bert \
+            --data "$DATA_CSV" \
+            --subset_rows 5000 \
+            --model_name "distilbert-base-uncased" \
+            --epochs 1 \
+            --batch_size 32 \
+            --max_length 96 \
+            --lr 3e-5 \
+            --exp_name "ci_bert_smoketest"
+
+  # --------------------------
+  # LSTM (PyTorch)
+  # --------------------------
+  train-lstm:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.lstm == 'true' || needs.detect-changes.outputs.common == 'true'
+    runs-on: ubuntu-latest
+    env:
+      MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+      EMB_PATH: data/embeddings/glove.twitter.27B.200d.txt
+      EMB_URL: ${{ secrets.GLOVE_200D_URL }} # optionnel
+      DATA_CSV: data/training.csv
+      DATA_CSV_URL: ${{ secrets.DATA_CSV_URL }} # optionnel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install deps
+        run: |
+          python -m pip install -U pip
           pip install -r requirements.txt
 
-      - name: Set MLflow tracking URI
-        run: echo "MLFLOW_TRACKING_URI=http://51.21.80.97:5000" >> $GITHUB_ENV
-
-      - name: Run modified training scripts
+      - name: Prepare data & embeddings
         run: |
-          echo "Modified scripts:"
-          git diff --name-only HEAD^ HEAD | grep '^scripts/' || echo "No script changes."
-          for file in $(git diff --name-only HEAD^ HEAD | grep '^scripts/'); do
-            echo "Running $file..."
-            python $file || true
-          done
+          mkdir -p data data/embeddings
+          if [ ! -f "$DATA_CSV" ]; then
+            if [ -n "$DATA_CSV_URL" ]; then
+              curl -L "$DATA_CSV_URL" -o "$DATA_CSV"
+            else
+              echo "No dataset available. Skipping."
+              exit 0
+            fi
+          fi
+          if [ ! -f "$EMB_PATH" ]; then
+            if [ -n "$EMB_URL" ]; then
+              echo "Downloading embeddings…"
+              curl -L "$EMB_URL" -o "$EMB_PATH"
+            else
+              echo "No embeddings available. Skipping."
+              exit 0
+            fi
+          fi
+
+      - name: Train (smoketest)
+        run: |
+          python -m scripts.run_lstm_torch \
+            --data "$DATA_CSV" \
+            --embedding_path "$EMB_PATH" \
+            --embedding_dim 200 \
+            --subset_rows 10000 \
+            --epochs 2 \
+            --batch_size 256
+
+  # --------------------------
+  # TextCNN (TensorFlow/Keras)
+  # --------------------------
+  train-textcnn:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.textcnn == 'true' || needs.detect-changes.outputs.common == 'true'
+    runs-on: ubuntu-latest
+    env:
+      MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+      DATA_CSV: data/training.csv
+      DATA_CSV_URL: ${{ secrets.DATA_CSV_URL }}    # optionnel
+      EMB_PATH: data/embeddings/glove.twitter.27B.200d.txt
+      EMB_URL: ${{ secrets.GLOVE_200D_URL }}       # optionnel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install deps
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt
+
+      - name: Prepare data & embeddings
+        run: |
+          mkdir -p data data/embeddings
+          if [ ! -f "$DATA_CSV" ]; then
+            if [ -n "$DATA_CSV_URL" ]; then
+              curl -L "$DATA_CSV_URL" -o "$DATA_CSV"
+            else
+              echo "No dataset available. Skipping."
+              exit 0
+            fi
+          fi
+          if [ ! -f "$EMB_PATH" ]; then
+            if [ -n "$EMB_URL" ]; then
+              echo "Downloading embeddings…"
+              curl -L "$EMB_URL" -o "$EMB_PATH"
+            else
+              echo "No embeddings available. Skipping."
+              exit 0
+            fi
+          fi
+
+      - name: Train (smoketest)
+        run: |
+          python -m scripts.run_textcnn \
+            --data "$DATA_CSV" \
+            --embedding_path "$EMB_PATH" \
+            --embedding_dim 200 \
+            --subset_rows 5000 \
+            --epochs 2 \
+            --batch_size 256 \
+            --experiment "ci_textcnn_smoketest"
+
+  # --------------------------
+  # Baseline LogReg (rapide)
+  # --------------------------
+  train-logreg:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.logreg == 'true' || needs.detect-changes.outputs.common == 'true'
+    runs-on: ubuntu-latest
+    env:
+      MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+      DATA_CSV: data/training.csv
+      DATA_CSV_URL: ${{ secrets.DATA_CSV_URL }} # optionnel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install deps
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt
+
+      - name: Prepare dataset
+        run: |
+          mkdir -p data
+          if [ ! -f "$DATA_CSV" ]; then
+            if [ -n "$DATA_CSV_URL" ]; then
+              curl -L "$DATA_CSV_URL" -o "$DATA_CSV"
+            else
+              echo "No dataset available. Skipping."
+              exit 0
+            fi
+          fi
+
+      - name: Train (fast)
+        run: |
+          python -m scripts.run_logreg \
+            --data "$DATA_CSV" \
+            --subset_rows 20000 \
+            --ngram_max 2 \
+            --experiment "ci_baseline_lr"
