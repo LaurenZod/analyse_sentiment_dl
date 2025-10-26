@@ -46,3 +46,5 @@ __pycache__/
 classification_report.txt
 roc_curve.png
 confusion_val.png
+mlruns_backup.tar.gz
+mlruns_backup*.tar.gz
