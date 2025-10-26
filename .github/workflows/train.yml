@@ -12,6 +12,7 @@ on:
   workflow_dispatch: {}
 
 jobs:
+  # Détection des fichiers modifiés
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
@@ -46,9 +47,12 @@ jobs:
     if: needs.detect-changes.outputs.bert == 'true' || needs.detect-changes.outputs.common == 'true'
     runs-on: ubuntu-latest
     env:
+      # MLflow à partir du secret du repo
       MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+      # HF en mode PyTorch only
       TRANSFORMERS_NO_TF: "1"
       TOKENIZERS_PARALLELISM: "false"
+      # Dataset
       DATA_CSV: data/training.csv
       DATA_CSV_URL: ${{ secrets.DATA_CSV_URL }} # optionnel
     steps:
@@ -70,13 +74,14 @@ jobs:
           mkdir -p data
           if [ ! -f "$DATA_CSV" ]; then
             if [ -n "$DATA_CSV_URL" ]; then
+              echo "Downloading dataset from \$DATA_CSV_URL -> \$DATA_CSV"
               curl -L "$DATA_CSV_URL" -o "$DATA_CSV"
             else
-              echo "Dataset not found and DATA_CSV_URL not set. Skipping."
+              echo "Dataset not found and DATA_CSV_URL not set. Skipping job."
               exit 0
             fi
           fi
-      - name: Train (smoketest)  # pas d'--exp_name => on respecte les noms d’XP du script
+      - name: Train (smoketest)
         run: |
           python -m scripts.run_bert \
             --data "$DATA_CSV" \
@@ -116,23 +121,28 @@ jobs:
       - name: Prepare data & embeddings
         run: |
           mkdir -p data data/embeddings
+          # Dataset
           if [ ! -f "$DATA_CSV" ]; then
             if [ -n "$DATA_CSV_URL" ]; then
+              echo "Downloading dataset from \$DATA_CSV_URL -> \$DATA_CSV"
               curl -L "$DATA_CSV_URL" -o "$DATA_CSV"
             else
-              echo "No dataset. Skipping."
+              echo "No dataset. Skipping job."
               exit 0
             fi
           fi
+          # Embeddings
           if [ ! -f "$EMB_PATH" ]; then
             if [ -n "$GLOVE_200D_URL" ]; then
+              echo "Downloading GloVe 200d from \$GLOVE_200D_URL -> \$EMB_PATH"
+              mkdir -p "$(dirname "$EMB_PATH")"
               curl -L "$GLOVE_200D_URL" -o "$EMB_PATH"
             else
-              echo "No embeddings. Skipping."
+              echo "No embeddings. Skipping job."
               exit 0
             fi
           fi
-      - name: Train (smoketest)  # pas d'--experiment => on respecte le nom d’XP du script
+      - name: Train (smoketest)
         run: |
           python -m scripts.run_lstm_torch \
             --data "$DATA_CSV" \
@@ -143,7 +153,7 @@ jobs:
             --batch_size 256
 
   # --------------------------
-  # TextCNN (TensorFlow/Keras) – utilise requirements_tf.txt
+  # TextCNN (TensorFlow/Keras) – requirements_tf.txt
   # --------------------------
   train-textcnn:
     needs: detect-changes
@@ -163,31 +173,36 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt', 'requirements_tf.txt') }}
-      - name: Install deps (TF)
+          key: ${{ runner.os }}-pip-tf-${{ hashFiles('requirements_tf.txt') }}
+      - name: Install deps (TF stack)
         run: |
           python -m pip install -U pip
           pip install -r requirements_tf.txt
       - name: Prepare data & embeddings
         run: |
           mkdir -p data data/embeddings
+          # Dataset
           if [ ! -f "$DATA_CSV" ]; then
             if [ -n "$DATA_CSV_URL" ]; then
+              echo "Downloading dataset from \$DATA_CSV_URL -> \$DATA_CSV"
               curl -L "$DATA_CSV_URL" -o "$DATA_CSV"
             else
-              echo "No dataset. Skipping."
+              echo "No dataset. Skipping job."
               exit 0
             fi
           fi
+          # Embeddings
           if [ ! -f "$EMB_PATH" ]; then
             if [ -n "$GLOVE_200D_URL" ]; then
+              echo "Downloading GloVe 200d from \$GLOVE_200D_URL -> \$EMB_PATH"
+              mkdir -p "$(dirname "$EMB_PATH")"
               curl -L "$GLOVE_200D_URL" -o "$EMB_PATH"
             else
-              echo "No embeddings. Skipping."
+              echo "No embeddings. Skipping job."
               exit 0
             fi
           fi
-      - name: Train (smoketest)  # pas d'--experiment => on respecte le nom d’XP du script
+      - name: Train (smoketest)
         run: |
           python -m scripts.run_textcnn \
             --data "$DATA_CSV" \
@@ -226,13 +241,14 @@ jobs:
           mkdir -p data
           if [ ! -f "$DATA_CSV" ]; then
             if [ -n "$DATA_CSV_URL" ]; then
+              echo "Downloading dataset from \$DATA_CSV_URL -> \$DATA_CSV"
               curl -L "$DATA_CSV_URL" -o "$DATA_CSV"
             else
-              echo "No dataset. Skipping."
+              echo "No dataset. Skipping job."
               exit 0
             fi
           fi
-      - name: Train (fast)  # pas d'--experiment => on respecte le nom d’XP du script
+      - name: Train (fast)
         run: |
           python -m scripts.run_logreg \
             --data "$DATA_CSV" \
