@@ -2,6 +2,8 @@
 # Fine-tuning DistilBERT en PyTorch pur + logging MLflow (MPS/Apple ok, warmup, clipping, artefacts)
 
 import os
+
+import mlflow.transformers
 os.environ["TRANSFORMERS_NO_TF"] = "1"        # force Transformers en mode PyTorch
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -12,6 +14,7 @@ import io
 import numpy as np
 import pandas as pd
 import mlflow
+import mlflow.transformers 
 
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
@@ -24,7 +27,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 from transformers import (
     AutoTokenizer, AutoModelForSequenceClassification,
-    get_linear_schedule_with_warmup
+    get_linear_schedule_with_warmup, pipeline
 )
 import matplotlib
 matplotlib.use("Agg")
@@ -152,7 +155,9 @@ def main():
     parser.add_argument("--data", type=str, required=True)
     parser.add_argument("--subset_rows", type=int, default=200000,
                         help="Sous-échantillon équilibré si renseigné (≈ moitié nég/pos).")
-    parser.add_argument("--model_name", type=str, default="distilbert-base-uncased")
+    parser.add_argument("--model_name", type=str,
+                        default="models/bert/distilbert-base-uncased",
+                        help="Nom du modèle (chemin local ou ID Hugging Face, ex: 'distilbert-base-uncased' ou dossier local).")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--max_length", type=int, default=128)
@@ -167,8 +172,9 @@ def main():
     device = get_device()
     print("Device:", device)
 
-    # MLflow local
-    mlflow.set_tracking_uri("file:./mlruns")
+    # MLflow: respect env var if provided, fallback to local file store
+    uri = os.getenv("MLFLOW_TRACKING_URI")
+    mlflow.set_tracking_uri(uri if uri else "file:./mlruns")
     mlflow.set_experiment(args.exp_name)
 
     # Chargement données
@@ -207,7 +213,7 @@ def main():
     total_steps = len(train_loader) * args.epochs
     warmup_steps = max(1, int(0.1 * total_steps))
 
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
     )
@@ -287,6 +293,20 @@ def main():
                 plt.xlabel("FPR"); plt.ylabel("TPR"); plt.title("ROC curve"); plt.legend()
                 mlflow.log_figure(fig, "roc_curve.png")
                 plt.close(fig)
+
+        # Recharge le meilleure modèle et log via chemin du checkpoint uniquement
+        pipe = pipeline(
+            task="text-classification",
+            model=best_path,
+            tokenizer=best_path,
+            device=-1
+        )
+        
+        mlflow.transformers.log_model(
+            transformers_model=pipe,
+            artifact_path='bert_model',
+            registered_model_name='tweet_prediction'
+        )
 
         print(f"✅ {args.model_name} — best val_f1: {best_val_f1:.4f} | dur: {dur:.1f}s")
 
