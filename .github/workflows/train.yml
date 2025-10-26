@@ -1,0 +1,38 @@
+name: Auto-train Models on Commit
+
+on:
+  push:
+    paths:
+      - 'scripts/*.py'      # déclenche si un script de modèle change
+    branches:
+      - main
+
+jobs:
+  train-models:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Set MLflow tracking URI
+        run: echo "MLFLOW_TRACKING_URI=http://51.21.80.97:5000" >> $GITHUB_ENV
+
+      - name: Run modified training scripts
+        run: |
+          echo "Modified scripts:"
+          git diff --name-only HEAD^ HEAD | grep '^scripts/' || echo "No script changes."
+          for file in $(git diff --name-only HEAD^ HEAD | grep '^scripts/'); do
+            echo "Running $file..."
+            python $file || true
+          done
