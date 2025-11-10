@@ -1,4 +1,4 @@
-tensorflow-macos==2.16.2
+tensorflow==2.16.2
 tensorflow-metal==1.1.0
 keras>=3.10
 mlflow>=2.16,<3
