@@ -1,0 +1,4 @@
+tensorflow==2.16.0
+mlflow
+numpy
+scikit-learn
