@@ -49,7 +49,10 @@ def load_balanced_subset_csv(path, per_class, chunksize=100_000, seed=42):
     neg_parts, pos_parts = [], []
     for chunk in pd.read_csv(path, chunksize=chunksize, on_bad_lines="skip", **READ_KW):
         # Mapping cohérent: 0 = négatif (target=0), 1 = positif (target=4)
-        chunk["label"] = chunk["target"].map({0:0, 4:1}).astype(int)
+        chunk["label"] = chunk["target"].map({0: 0, 4: 1})
+        chunk.dropna(subset=["label"], inplace=True)
+        chunk["label"] = chunk["label"].astype(int)
+
         cneg = chunk[chunk["label"] == 0][["text","label"]]
         cpos = chunk[chunk["label"] == 1][["text","label"]]
         if want_neg > 0 and len(cneg):

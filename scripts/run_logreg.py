@@ -88,9 +88,8 @@ def main():
     np.random.seed(args.random_state)
     random.seed(args.random_state)
 
-    # MLflow: honor env var if present, else fall back to local file store
-    uri = os.getenv("MLFLOW_TRACKING_URI")
-    mlflow.set_tracking_uri(uri if uri else "file:./mlruns")
+    # MLflow
+    mlflow.set_tracking_uri("file:./mlruns")
     mlflow.set_experiment(args.experiment)
 
     # Lecture CSV (Sentiment140)
@@ -101,8 +100,9 @@ def main():
     )
     if args.subset_rows:
         df_full = pd.read_csv(args.data, **read_kwargs)
-        df_full["label"] = df_full["target"].map({0:0, 4:1}).astype(int)
-        df_full = df_full[["text","label"]].dropna()
+        df_full["label"] = df_full["target"].map({0:0, 4:1})
+        df_full.dropna(subset=["label"], inplace=True)
+        df_full["label"] = df_full["label"].astype(int)
 
         n = args.subset_rows // 2
         # Sécurise si une classe a moins que n (label: 0 = négatif, 1 = positif)

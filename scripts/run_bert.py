@@ -200,10 +200,12 @@ def main():
         engine="python", on_bad_lines="skip"
     )
     # Mapping aligné: 0 = négatif (target=0), 1 = positif (target=4)
-    df["label"] = df["target"].map({0:0, 4:1}).astype(int)
-    df = df[["text","label"]].dropna()
-
+    df["label"] = df["target"].map({0:0, 4:1})
+    df = df[["text","label"]].dropna(subset=["label"])
+    df["label"] = df["label"].astype(int)
+    
     assert set(df["label"].unique()) <= {0, 1}
+    
 
     # Sous-échantillon équilibré si demandé
     if args.subset_rows:
