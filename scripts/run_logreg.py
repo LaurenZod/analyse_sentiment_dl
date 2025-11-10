@@ -88,8 +88,9 @@ def main():
     np.random.seed(args.random_state)
     random.seed(args.random_state)
 
-    # MLflow
-    mlflow.set_tracking_uri("file:./mlruns")
+    # MLflow: honor env var if present, else fall back to local file store
+    uri = os.getenv("MLFLOW_TRACKING_URI")
+    mlflow.set_tracking_uri(uri if uri else "file:./mlruns")
     mlflow.set_experiment(args.experiment)
 
     # Lecture CSV (Sentiment140)

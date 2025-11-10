@@ -48,3 +48,20 @@ roc_curve.png
 confusion_val.png
 mlruns_backup.tar.gz
 mlruns_backup*.tar.gz
+
+# --- AJOUTS POUR MLOPS/API DEPLOIEMENT ---
+
+# Fichiers de log de l'API (générés en production)
+production_inferences.jsonl
+monitoring_report.txt
+accuracy_trigger.txt
+nohup.out
+
+# Fichiers de test et d'exécution ponctuels
+load_test.py
+register_model.py
+run_all_max.sh
+dockerfile
+
+# Poids de modèles non gérés par MLflow
+bert_model/

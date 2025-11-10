@@ -1,8 +1,9 @@
-# scripts/run_textcnn.py (version optimisée et corrigée)
+# scripts/run_textcnn.py (version optimisée et corrigée) — MLflow TF autolog désactivé pour éviter les gros checkpoints
 import os, re, time, argparse, subprocess, io
 import numpy as np
 import pandas as pd
-import mlflow, mlflow.tensorflow
+import mlflow
+import mlflow.tensorflow as mlflow_tf
 
 # --- Artifact/model directory constants ---
 ART_DIR = os.path.join("artifacts", "textcnn")
@@ -22,7 +23,7 @@ from sklearn.metrics import f1_score, accuracy_score, confusion_matrix, roc_curv
 def parse_args():
     ap = argparse.ArgumentParser(description="TextCNN (Conv1D) + embeddings pré-entraînés, log MLflow (version optimisée)")
     ap.add_argument("--data", type=str, required=True)
-    ap.add_argument("--experiment", type=str, default="textcnn_embeddings")
+    ap.add_argument("--experiment", type=str, default="textcnn_full_ft")
     ap.add_argument("--subset_rows", type=int, default=200000)
     ap.add_argument("--test_size", type=float, default=0.2)
     ap.add_argument("--random_state", type=int, default=42)
@@ -52,6 +53,11 @@ def parse_args():
     # Fine-tuning embedding (optionnel si non-trainable au début)
     ap.add_argument("--ft_epochs", type=int, default=2)
     ap.add_argument("--ft_lr", type=float, default=5e-4)
+
+    ap.add_argument("--save_format", type=str, choices=["keras", "saved_model"], default="keras",
+                    help="Format de sauvegarde du modèle à uploader sur MLflow (choisir 'keras' OU 'saved_model')")
+    ap.add_argument("--log_checkpoints", action="store_true",
+                    help="Si présent, sauvegarde un checkpoint local (best) pendant l'entraînement. Non uploadé si non demandé explicitement.")
 
     return ap.parse_args()
 
@@ -185,9 +191,17 @@ def main():
     np.random.seed(args.random_state)
     tf.random.set_seed(args.random_state)
     os.environ["PYTHONHASHSEED"] = str(args.random_state)
-    mlflow.set_tracking_uri("file:./mlruns")
+
+    # Rendre l'upload d'artefacts plus tolérant côté client (réseau EC2)
+    os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "1800")   # 30 min
+    os.environ.setdefault("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "8")  # éviter l'erreur "in excess of the maximum allowable"
+    # Désactiver tout autolog MLflow côté TensorFlow/Keras pour éviter les checkpoints HDF5 à chaque epoch
+    os.environ["MLFLOW_AUTOLOGGING_ENABLED"] = "false"
+    mlflow_tf.autolog(disable=True)
+
+    uri = os.getenv("MLFLOW_TRACKING_URI")
+    mlflow.set_tracking_uri(uri if uri else "file:./mlruns")
     mlflow.set_experiment(args.experiment)
-    mlflow.tensorflow.autolog(silent=True, log_models=False)
 
     # Data
     if args.subset_rows:
@@ -253,13 +267,24 @@ def main():
 
         model = build_textcnn(vocab_size, args.seq_len, emb_matrix, args.trainable_embed,
                               args.filters, kernel_sizes, args.dropout, args.spatial_dropout, lr=args.lr)
-        os.makedirs(MODEL_DIR, exist_ok=True)
 
         cbs = [
             keras.callbacks.EarlyStopping(monitor="val_accuracy", patience=args.early_stop_patience, restore_best_weights=True),
-            keras.callbacks.ModelCheckpoint(os.path.join(MODEL_DIR, "best.keras"), monitor="val_accuracy", save_best_only=True),
             keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=2, min_lr=1e-5, verbose=1),
         ]
+
+        # Optionnel: checkpoint local uniquement (pas d'upload automatique)
+        if args.log_checkpoints:
+            os.makedirs(MODEL_DIR, exist_ok=True)
+            cbs.append(
+                keras.callbacks.ModelCheckpoint(
+                    filepath=os.path.join(MODEL_DIR, "best.keras"),
+                    monitor="val_accuracy",
+                    save_best_only=True,
+                    save_weights_only=False,
+                    verbose=1,
+                )
+            )
 
         t0 = time.perf_counter()
         hist = model.fit(Xtr_ids, y_train,
@@ -302,16 +327,47 @@ def main():
             mlflow.log_metric("f1_macro_finetune", float(f1_ft))
             mlflow.log_metric("accuracy_finetune", float(acc_ft))
 
-        # Rapport + sauvegardes
+        # Rapport + sauvegardes (légères)
         mlflow.log_text(classification_report(y_test, y_pred, digits=3), "classification_report.txt")
 
         os.makedirs(MODEL_DIR, exist_ok=True)
-        model.save(os.path.join(MODEL_DIR, "model.keras"), include_optimizer=False)
-        model.export(os.path.join(MODEL_DIR, "saved_model"))
-        with open(os.path.join(MODEL_DIR, "vocab.txt"), "w") as f:
+
+        # Sauvegarde du modèle FINAL dans un seul format choisi
+        if args.save_format == "keras":
+            model_path = os.path.join(MODEL_DIR, "model.keras")
+            model.save(model_path, include_optimizer=False)
+            # Garde-fou de taille: ne pas uploader si trop volumineux
+            max_mb = int(os.getenv("MAX_MODEL_MB", "50"))
+            size_mb = os.path.getsize(model_path) / (1024 * 1024)
+            if size_mb <= max_mb:
+                mlflow.log_artifact(model_path, artifact_path="model")
+            else:
+                with open(os.path.join(MODEL_DIR, "upload_skipped.txt"), "w") as f:
+                    f.write(f"Model size {size_mb:.1f} MB exceeds limit {max_mb} MB. Upload skipped.\n")
+                mlflow.log_artifact(os.path.join(MODEL_DIR, "upload_skipped.txt"), artifact_path="model")
+        else:  # saved_model
+            import shutil
+            sm_dir = os.path.join(MODEL_DIR, "saved_model")
+            model.export(sm_dir)
+            # Zipper le SavedModel pour un upload unique
+            zip_path = os.path.join(MODEL_DIR, "saved_model.zip")
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+            shutil.make_archive(zip_path[:-4], 'zip', sm_dir)
+            max_mb = int(os.getenv("MAX_MODEL_MB", "50"))
+            size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+            if size_mb <= max_mb:
+                mlflow.log_artifact(zip_path, artifact_path="model")
+            else:
+                with open(os.path.join(MODEL_DIR, "upload_skipped.txt"), "w") as f:
+                    f.write(f"SavedModel zip size {size_mb:.1f} MB exceeds limit {max_mb} MB. Upload skipped.\n")
+                mlflow.log_artifact(os.path.join(MODEL_DIR, "upload_skipped.txt"), artifact_path="model")
+
+        # Vocabulaire (léger)
+        vocab_path = os.path.join(MODEL_DIR, "vocab.txt")
+        with open(vocab_path, "w") as f:
             f.write("\n".join(vocab))
-        # Log the entire artifact folder once
-        mlflow.log_artifacts(ART_DIR)
+        mlflow.log_artifact(vocab_path, artifact_path="model")
 
         print(f"✅ TextCNN(opt) — f1_macro: {f1:.4f} | accuracy: {acc:.4f} | dur: {dur:.1f}s")
 

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Exemples de valeurs (à mettre en prod via `export` dans le shell ou un service systemd) :
+# export MLFLOW_TRACKING_URI="http://51.21.80.97:5000"
+# export MODEL_NAME="tweet_prediction"
+# export MODEL_STAGE="Production"
+# export API_KEY="change-me"
+
+exec uvicorn main:app \
+  --host 0.0.0.0 \
+  --port 8080 \
+  --workers 1

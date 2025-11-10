@@ -2,8 +2,6 @@
 # Fine-tuning DistilBERT en PyTorch pur + logging MLflow (MPS/Apple ok, warmup, clipping, artefacts)
 
 import os
-
-import mlflow.transformers
 os.environ["TRANSFORMERS_NO_TF"] = "1"        # force Transformers en mode PyTorch
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -15,6 +13,23 @@ import numpy as np
 import pandas as pd
 import mlflow
 import mlflow.transformers 
+from mlflow.tracking import MlflowClient
+from mlflow import transformers as mlflow_hf
+import contextlib
+
+# Avant tout usage MLflow :
+os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "300")      # 5 min
+os.environ.setdefault("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "8")    # <= 8 pour éviter l’erreur “in excess of maximum”
+os.environ.setdefault("MLFLOW_TRACKING_INSECURE_TLS", "true")    # au cas où HTTPS est absent
+os.environ.setdefault("MLFLOW_AUTOLOGGING_ENABLED", "false")     # pas d’autolog TF/Keras qui spam les endpoints
+
+# Helper: n’échoue jamais si MLflow est KO
+def try_mlflow(call, *args, **kwargs):
+    try:
+        return call(*args, **kwargs)
+    except Exception as e:
+        print(f"[MLflow WARN] {call.__name__} failed: {e}")
+        return None
 
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
@@ -166,6 +181,7 @@ def main():
     parser.add_argument("--early_stop_patience", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--exp_name", type=str, default="bert_finetune")
+    parser.add_argument("--register_alias", type=str, default="", help="Alias MLflow à appliquer à la version enregistrée (ex: 'tweet_predictions_bert'). Laisser vide pour ne pas créer/modifier d'alias.")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -175,7 +191,7 @@ def main():
     # MLflow: respect env var if provided, fallback to local file store
     uri = os.getenv("MLFLOW_TRACKING_URI")
     mlflow.set_tracking_uri(uri if uri else "file:./mlruns")
-    mlflow.set_experiment(args.exp_name)
+    try_mlflow(mlflow.set_experiment, args.exp_name)
 
     # Chargement données
     cols = ["target","ids","date","flag","user","text"]
@@ -222,8 +238,8 @@ def main():
     no_improve = 0
     best_epoch = -1
 
-    with mlflow.start_run(run_name=f"{args.model_name}_finetune"):
-        mlflow.log_params({
+    with mlflow.start_run(run_name=f"{args.model_name}_finetune") as run:
+        try_mlflow(mlflow.log_params, {
             **vars(args),
             "device": str(device),
             "warmup_steps": warmup_steps,
@@ -246,7 +262,7 @@ def main():
                   f"Train loss {tr_loss:.4f} f1 {tr_f1:.4f} acc {tr_acc:.4f} | "
                   f"Val loss {val_loss:.4f} f1 {val_f1:.4f} acc {val_acc:.4f}")
 
-            mlflow.log_metrics({
+            try_mlflow(mlflow.log_metrics, {
                 "train_loss": tr_loss, "train_f1": tr_f1, "train_acc": tr_acc,
                 "val_loss": val_loss, "val_f1": val_f1, "val_acc": val_acc
             }, step=epoch+1)
@@ -265,34 +281,36 @@ def main():
 
 
         dur = time.time() - start
-        mlflow.log_metric("duration", dur)
-        mlflow.log_metric("best_val_f1", float(best_val_f1))
-        mlflow.log_metric("best_epoch", int(best_epoch))
+        try_mlflow(mlflow.log_metric, "duration", dur)
+        try_mlflow(mlflow.log_metric, "best_val_f1", float(best_val_f1))
+        try_mlflow(mlflow.log_metric, "best_epoch", int(best_epoch))
 
         # Artefacts : confusion matrix + classification report + ROC (sur la dernière éval)
         if last_y_true is not None and last_y_pred is not None:
             # Confusion matrix figure -> directly to MLflow
             fig, ax = plt.subplots()
             ConfusionMatrixDisplay.from_predictions(last_y_true, last_y_pred, ax=ax)
-            mlflow.log_figure(fig, "confusion_val.png")
+            try_mlflow(mlflow.log_figure, fig, "confusion_val.png")
             plt.close(fig)
 
             # Classification report -> directly as text artifact
             rep_txt = classification_report(last_y_true, last_y_pred, digits=4)
-            mlflow.log_text(rep_txt, "classification_report.txt")
+            try_mlflow(mlflow.log_text, rep_txt, "classification_report.txt")
 
             # ROC + AUC (needs probability scores)
             if last_y_scores is not None:
                 fpr, tpr, _ = roc_curve(last_y_true, last_y_scores)
                 roc_auc = auc(fpr, tpr)
-                mlflow.log_metric("auc", float(roc_auc))
+                try_mlflow(mlflow.log_metric, "auc", float(roc_auc))
 
                 fig = plt.figure()
                 plt.plot(fpr, tpr, linewidth=2, label=f"AUC = {roc_auc:.3f}")
                 plt.plot([0, 1], [0, 1], "--")
                 plt.xlabel("FPR"); plt.ylabel("TPR"); plt.title("ROC curve"); plt.legend()
-                mlflow.log_figure(fig, "roc_curve.png")
+                try_mlflow(mlflow.log_figure, fig, "roc_curve.png")
                 plt.close(fig)
+
+        try_mlflow(mlflow.set_tags, {"framework": "transformers", "hf_model": args.model_name, "device": str(device)})
 
         # Recharge le meilleure modèle et log via chemin du checkpoint uniquement
         pipe = pipeline(
@@ -301,12 +319,31 @@ def main():
             tokenizer=best_path,
             device=-1
         )
-        
-        mlflow.transformers.log_model(
+
+        # Sauvegarde locale au format MLflow Transformers (crée le dossier 'bert_model' avec MLmodel)
+        mlflow_hf.save_model(
             transformers_model=pipe,
-            artifact_path='bert_model',
-            registered_model_name='tweet_prediction'
+            path="bert_model",
+            task="text-classification"
         )
+
+        # Enregistrement dans le Model Registry sous le nom demandé
+        reg = mlflow.register_model(
+            model_uri=f"runs:/{run.info.run_id}/bert_model",
+            name="tweet_prediction"
+        )
+
+        # Alias optionnel
+        if args.register_alias:
+            try:
+                MlflowClient().set_registered_model_alias(
+                    name="tweet_prediction",
+                    alias=args.register_alias,
+                    version=reg.version
+                )
+                print(f"[MLflow] Alias '{args.register_alias}' -> v{reg.version}")
+            except Exception as e:
+                print(f"[MLflow WARN] set alias failed: {e}")
 
         print(f"✅ {args.model_name} — best val_f1: {best_val_f1:.4f} | dur: {dur:.1f}s")
 

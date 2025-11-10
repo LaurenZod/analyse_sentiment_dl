@@ -199,8 +199,10 @@ def run_epoch(model, loader, criterion, optimizer=None, device=None, return_scor
         Xb = Xb.to(device)
         yb = yb.to(device)
 
-        logits = model(Xb)
-        loss = criterion(logits, yb)
+        # Forward + loss with grad only if training
+        with torch.set_grad_enabled(is_train):
+            logits = model(Xb)
+            loss = criterion(logits, yb)
         if is_train:
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -208,7 +210,8 @@ def run_epoch(model, loader, criterion, optimizer=None, device=None, return_scor
             optimizer.step()
 
         losses.append(loss.item())
-        probs = torch.sigmoid(logits)
+        # Use detached probabilities to avoid tracking gradients in eval
+        probs = torch.sigmoid(logits).detach()
         pred = (probs >= 0.5).long().cpu().numpy()
         if return_scores:
             # store raw probabilities for ROC
@@ -318,7 +321,8 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     # ---------- MLflow
-    mlflow.set_tracking_uri("file:./mlruns")
+    uri = os.getenv("MLFLOW_TRACKING_URI")
+    mlflow.set_tracking_uri(uri if uri else "file:./mlruns")
     mlflow.set_experiment(args.experiment)
     with mlflow.start_run(run_name=f"lstm_torch_glove_{args.embedding_dim}d"):
         run_id = mlflow.active_run().info.run_id
