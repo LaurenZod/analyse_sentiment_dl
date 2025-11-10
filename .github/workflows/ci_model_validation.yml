@@ -8,7 +8,6 @@ on:
       - "scripts/run_textcnn.py"
       - "scripts/run_logreg.py"
       - "requirements.txt"
-      - "requirements_tf.txt"
   workflow_dispatch: {}
 
 jobs:
@@ -33,7 +32,6 @@ jobs:
               - 'scripts/run_lstm_torch.py'
             textcnn:
               - 'scripts/run_textcnn.py'
-              - 'requirements_tf.txt'
             logreg:
               - 'scripts/run_logreg.py'
             common:
@@ -163,7 +161,7 @@ jobs:
             --batch_size 256
 
   # --------------------------
-  # TextCNN (TensorFlow/Keras) – requirements_tf.txt
+  # TextCNN (TensorFlow/Keras)
   # --------------------------
   train-textcnn:
     needs: detect-changes
@@ -183,7 +181,11 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-tf-${{ hashFiles('requirements_tf.txt') }}
+          # NOUVELLE CLÉ DE CACHE basée sur le fichier isolé
+          key: ${{ runner.os }}-pip-textcnn-ci-${{ hashFiles('requirements_textcnn.txt') }} 
+          # Optionnel: Force à ne pas utiliser l'ancien cache TF
+          restore-keys: |
+            ${{ runner.os }}-pip-textcnn-ci- 
       - name: Install deps (TF stack)
         run: |
           python -m pip install -U pip
