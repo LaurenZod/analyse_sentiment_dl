@@ -338,7 +338,7 @@ def main():
         # Sauvegarde du modèle FINAL dans un seul format choisi
         if args.save_format == "keras":
             model_path = os.path.join(MODEL_DIR, "model.keras")
-            model.save(model_path, include_optimizer=False)
+            model.save(model_path) # include_optimizer=False  / Au cas ou...
             # Garde-fou de taille: ne pas uploader si trop volumineux
             max_mb = int(os.getenv("MAX_MODEL_MB", "50"))
             size_mb = os.path.getsize(model_path) / (1024 * 1024)
