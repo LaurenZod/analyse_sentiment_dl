@@ -45,17 +45,14 @@ jobs:
     if: needs.detect-changes.outputs.bert == 'true' || needs.detect-changes.outputs.common == 'true'
     runs-on: ubuntu-latest
     env:
-      # MLflow à partir du secret du repo
       MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
-      # HF en mode PyTorch only
       TRANSFORMERS_NO_TF: "1"
       TOKENIZERS_PARALLELISM: "false"
-      # Dataset
       DATA_CSV: data/training.csv
-      DATA_CSV_URL: ${{ secrets.DATA_CSV_URL }} # optionnel
+      DATA_CSV_URL: ${{ secrets.DATA_CSV_URL }} # format s3://...
     steps:
       - uses: actions/checkout@v4
-      # 🔑 NOUVEAU : Configuration des identifiants AWS pour l'accès S3
+      # 🔑 Configuration des identifiants AWS pour l'accès S3
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -69,24 +66,24 @@ jobs:
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-      - name: Install deps
+      - name: Install deps & AWS CLI
         run: |
           python -m pip install -U pip
           pip install -r requirements.txt
           pip install accelerate
+          pip install awscli # 🛠️ Installation de l'AWS CLI
       
-      # NOUVELLE ÉTAPE : Vérification de la connexion MLflow
       - name: ⚙️ Vérifier la connexion MLflow
         run: python validate_mlflow.py
         
-      - name: Prepare dataset
+      - name: Prepare dataset (via AWS CLI)
         run: |
           mkdir -p data
           if [ ! -f "$DATA_CSV" ]; then
             if [ -n "$DATA_CSV_URL" ]; then
-              echo "Downloading dataset from \$DATA_CSV_URL -> \$DATA_CSV"
-              # 🛠️ AJOUT : -f/--fail pour échouer sur code HTTP d'erreur
-              curl -fL "$DATA_CSV_URL" -o "$DATA_CSV"
+              echo "Downloading dataset from $DATA_CSV_URL -> $DATA_CSV"
+              # 🛠️ Remplacement de curl par aws s3 cp
+              aws s3 cp "$DATA_CSV_URL" "$DATA_CSV" --region eu-north-1 
             else
               echo "Dataset not found and DATA_CSV_URL not set. Skipping job."
               exit 0
@@ -113,12 +110,12 @@ jobs:
     env:
       MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
       DATA_CSV: data/training.csv
-      DATA_CSV_URL: ${{ secrets.DATA_CSV_URL }}     # optionnel
+      DATA_CSV_URL: ${{ secrets.DATA_CSV_URL }}     # format s3://...
       EMB_PATH: data/embeddings/glove.twitter.27B.200d.txt
-      GLOVE_200D_URL: ${{ secrets.GLOVE_200D_URL }} # optionnel
+      GLOVE_200D_URL: ${{ secrets.GLOVE_200D_URL }} # format s3://...
     steps:
       - uses: actions/checkout@v4
-      # 🔑 NOUVEAU : Configuration des identifiants AWS pour l'accès S3
+      # 🔑 Configuration des identifiants AWS pour l'accès S3
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -132,24 +129,24 @@ jobs:
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-      - name: Install deps
+      - name: Install deps & AWS CLI
         run: |
           python -m pip install -U pip
           pip install -r requirements.txt
+          pip install awscli # 🛠️ Installation de l'AWS CLI
           
-      # NOUVELLE ÉTAPE : Vérification de la connexion MLflow
       - name: ⚙️ Vérifier la connexion MLflow
         run: python validate_mlflow.py
         
-      - name: Prepare data & embeddings
+      - name: Prepare data & embeddings (via AWS CLI)
         run: |
           mkdir -p data data/embeddings
           # Dataset
           if [ ! -f "$DATA_CSV" ]; then
             if [ -n "$DATA_CSV_URL" ]; then
-              echo "Downloading dataset from \$DATA_CSV_URL -> \$DATA_CSV"
-              # 🛠️ AJOUT : -f/--fail pour échouer sur code HTTP d'erreur
-              curl -fL "$DATA_CSV_URL" -o "$DATA_CSV"
+              echo "Downloading dataset from $DATA_CSV_URL -> $DATA_CSV"
+              # 🛠️ Remplacement de curl par aws s3 cp
+              aws s3 cp "$DATA_CSV_URL" "$DATA_CSV" --region eu-north-1
             else
               echo "No dataset. Skipping job."
               exit 0
@@ -158,10 +155,10 @@ jobs:
           # Embeddings
           if [ ! -f "$EMB_PATH" ]; then
             if [ -n "$GLOVE_200D_URL" ]; then
-              echo "Downloading GloVe 200d from \$GLOVE_200D_URL -> \$EMB_PATH"
+              echo "Downloading GloVe 200d from $GLOVE_200D_URL -> $EMB_PATH"
               mkdir -p "$(dirname "$EMB_PATH")"
-              # 🛠️ AJOUT : -f/--fail pour échouer sur code HTTP d'erreur
-              curl -fL "$GLOVE_200D_URL" -o "$EMB_PATH"
+              # 🛠️ Remplacement de curl par aws s3 cp
+              aws s3 cp "$GLOVE_200D_URL" "$EMB_PATH" --region eu-north-1
             else
               echo "No embeddings. Skipping job."
               exit 0
@@ -187,12 +184,12 @@ jobs:
     env:
       MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
       DATA_CSV: data/training.csv
-      DATA_CSV_URL: ${{ secrets.DATA_CSV_URL }}     # optionnel
+      DATA_CSV_URL: ${{ secrets.DATA_CSV_URL }}     # format s3://...
       EMB_PATH: data/embeddings/glove.twitter.27B.200d.txt
-      GLOVE_200D_URL: ${{ secrets.GLOVE_200D_URL }} # optionnel
+      GLOVE_200D_URL: ${{ secrets.GLOVE_200D_URL }} # format s3://...
     steps:
       - uses: actions/checkout@v4
-      # 🔑 NOUVEAU : Configuration des identifiants AWS pour l'accès S3
+      # 🔑 Configuration des identifiants AWS pour l'accès S3
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -205,30 +202,28 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          # NOUVELLE CLÉ DE CACHE basée sur le fichier isolé
           key: ${{ runner.os }}-pip-textcnn-ci-${{ hashFiles('requirements_textcnn.txt') }} 
-          # Optionnel: Force à ne pas utiliser l'ancien cache TF
           restore-keys: |
             ${{ runner.os }}-pip-textcnn-ci- 
-      - name: Install deps (TF stack)
+      - name: Install deps & AWS CLI (TF stack)
         run: |
           python -m pip install -U pip
-          # ⚠️ CORRECTION REQUISE : La dépendance 'requirements_textcnn.txt' doit être mise à jour pour TensorFlow 2.15.0
+          # ⚠️ CORRECTION NÉCESSAIRE: Vous devez avoir mis à jour requirements_textcnn.txt pour TF 2.15.0
           pip install -r requirements_textcnn.txt
+          pip install awscli # 🛠️ Installation de l'AWS CLI
           
-      # NOUVELLE ÉTAPE : Vérification de la connexion MLflow
       - name: ⚙️ Vérifier la connexion MLflow
         run: python validate_mlflow.py
         
-      - name: Prepare data & embeddings
+      - name: Prepare data & embeddings (via AWS CLI)
         run: |
           mkdir -p data data/embeddings
           # Dataset
           if [ ! -f "$DATA_CSV" ]; then
             if [ -n "$DATA_CSV_URL" ]; then
-              echo "Downloading dataset from \$DATA_CSV_URL -> \$DATA_CSV"
-              # 🛠️ AJOUT : -f/--fail pour échouer sur code HTTP d'erreur
-              curl -fL "$DATA_CSV_URL" -o "$DATA_CSV"
+              echo "Downloading dataset from $DATA_CSV_URL -> $DATA_CSV"
+              # 🛠️ Remplacement de curl par aws s3 cp
+              aws s3 cp "$DATA_CSV_URL" "$DATA_CSV" --region eu-north-1
             else
               echo "No dataset. Skipping job."
               exit 0
@@ -237,10 +232,10 @@ jobs:
           # Embeddings
           if [ ! -f "$EMB_PATH" ]; then
             if [ -n "$GLOVE_200D_URL" ]; then
-              echo "Downloading GloVe 200d from \$GLOVE_200D_URL -> \$EMB_PATH"
+              echo "Downloading GloVe 200d from $GLOVE_200D_URL -> $EMB_PATH"
               mkdir -p "$(dirname "$EMB_PATH")"
-              # 🛠️ AJOUT : -f/--fail pour échouer sur code HTTP d'erreur
-              curl -fL "$GLOVE_200D_URL" -o "$EMB_PATH"
+              # 🛠️ Remplacement de curl par aws s3 cp
+              aws s3 cp "$GLOVE_200D_URL" "$EMB_PATH" --region eu-north-1
             else
               echo "No embeddings. Skipping job."
               exit 0
@@ -266,10 +261,10 @@ jobs:
     env:
       MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
       DATA_CSV: data/training.csv
-      DATA_CSV_URL: ${{ secrets.DATA_CSV_URL }} # optionnel
+      DATA_CSV_URL: ${{ secrets.DATA_CSV_URL }} # format s3://...
     steps:
       - uses: actions/checkout@v4
-      # 🔑 NOUVEAU : Configuration des identifiants AWS pour l'accès S3
+      # 🔑 Configuration des identifiants AWS pour l'accès S3
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -283,23 +278,23 @@ jobs:
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-      - name: Install deps
+      - name: Install deps & AWS CLI
         run: |
           python -m pip install -U pip
           pip install -r requirements.txt
+          pip install awscli # 🛠️ Installation de l'AWS CLI
           
-      # NOUVELLE ÉTAPE : Vérification de la connexion MLflow
       - name: ⚙️ Vérifier la connexion MLflow
         run: python validate_mlflow.py
         
-      - name: Prepare dataset
+      - name: Prepare dataset (via AWS CLI)
         run: |
           mkdir -p data
           if [ ! -f "$DATA_CSV" ]; then
             if [ -n "$DATA_CSV_URL" ]; then
-              echo "Downloading dataset from \$DATA_CSV_URL -> \$DATA_CSV"
-              # 🛠️ AJOUT : -f/--fail pour échouer sur code HTTP d'erreur
-              curl -fL "$DATA_CSV_URL" -o "$DATA_CSV"
+              echo "Downloading dataset from $DATA_CSV_URL -> $DATA_CSV"
+              # 🛠️ Remplacement de curl par aws s3 cp
+              aws s3 cp "$DATA_CSV_URL" "$DATA_CSV" --region eu-north-1
             else
               echo "No dataset. Skipping job."
               exit 0
