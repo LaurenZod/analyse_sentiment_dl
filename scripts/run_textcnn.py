@@ -5,7 +5,7 @@ import pandas as pd
 import mlflow
 import mlflow.tensorflow as mlflow_tf
 
-# --- Artifact/model directory constants ---
+# --- Artifact/model directory constants --- 
 ART_DIR = os.path.join("artifacts", "textcnn")
 MODEL_DIR = os.path.join(ART_DIR, "model")
 
