@@ -281,7 +281,9 @@ def main():
     else:
         df = pd.read_csv(args.data, on_bad_lines="skip", **READ_KW)
         # Mapping cohérent: 0 = négatif, 1 = positif
-        df["label"] = df["target"].map({0:0, 4:1}).astype(int)
+        df["label"] = df["target"].map({0:0, 4:1})
+        df.dropna(subset=["label"], inplace=True)
+        df["label"] = df["label"].astype(int)
         df = df[["text","label"]].sample(frac=1.0, random_state=args.seed)
 
     df["text"] = df["text"].astype(str).apply(normalize_light)

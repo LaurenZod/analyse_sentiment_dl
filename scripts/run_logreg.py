@@ -113,8 +113,10 @@ def main():
         df = pd.concat([df_neg, df_pos]).sample(frac=1.0, random_state=args.random_state).reset_index(drop=True)
     else:
         df = pd.read_csv(args.data, **read_kwargs)
-        df["label"] = df["target"].map({0:0, 4:1}).astype(int)
-        df = df[["text","label"]].dropna()
+        df["label"] = df["target"].map({0:0, 4:1})
+        df.dropna(subset=["label"], inplace = True)
+        df = df[["text","label"]]
+        df["label"] = df["label"].astype(int)
 
     # Prétraitement léger
     X = df["text"].astype(str).apply(transform_bow)
