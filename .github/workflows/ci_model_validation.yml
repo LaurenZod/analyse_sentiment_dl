@@ -55,6 +55,13 @@ jobs:
       DATA_CSV_URL: ${{ secrets.DATA_CSV_URL }} # optionnel
     steps:
       - uses: actions/checkout@v4
+      # 🔑 NOUVEAU : Configuration des identifiants AWS pour l'accès S3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-north-1 # Région du bucket S3
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -78,7 +85,8 @@ jobs:
           if [ ! -f "$DATA_CSV" ]; then
             if [ -n "$DATA_CSV_URL" ]; then
               echo "Downloading dataset from \$DATA_CSV_URL -> \$DATA_CSV"
-              curl -L "$DATA_CSV_URL" -o "$DATA_CSV"
+              # 🛠️ AJOUT : -f/--fail pour échouer sur code HTTP d'erreur
+              curl -fL "$DATA_CSV_URL" -o "$DATA_CSV"
             else
               echo "Dataset not found and DATA_CSV_URL not set. Skipping job."
               exit 0
@@ -110,6 +118,13 @@ jobs:
       GLOVE_200D_URL: ${{ secrets.GLOVE_200D_URL }} # optionnel
     steps:
       - uses: actions/checkout@v4
+      # 🔑 NOUVEAU : Configuration des identifiants AWS pour l'accès S3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-north-1 # Région du bucket S3
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -133,7 +148,8 @@ jobs:
           if [ ! -f "$DATA_CSV" ]; then
             if [ -n "$DATA_CSV_URL" ]; then
               echo "Downloading dataset from \$DATA_CSV_URL -> \$DATA_CSV"
-              curl -L "$DATA_CSV_URL" -o "$DATA_CSV"
+              # 🛠️ AJOUT : -f/--fail pour échouer sur code HTTP d'erreur
+              curl -fL "$DATA_CSV_URL" -o "$DATA_CSV"
             else
               echo "No dataset. Skipping job."
               exit 0
@@ -144,7 +160,8 @@ jobs:
             if [ -n "$GLOVE_200D_URL" ]; then
               echo "Downloading GloVe 200d from \$GLOVE_200D_URL -> \$EMB_PATH"
               mkdir -p "$(dirname "$EMB_PATH")"
-              curl -L "$GLOVE_200D_URL" -o "$EMB_PATH"
+              # 🛠️ AJOUT : -f/--fail pour échouer sur code HTTP d'erreur
+              curl -fL "$GLOVE_200D_URL" -o "$EMB_PATH"
             else
               echo "No embeddings. Skipping job."
               exit 0
@@ -175,6 +192,13 @@ jobs:
       GLOVE_200D_URL: ${{ secrets.GLOVE_200D_URL }} # optionnel
     steps:
       - uses: actions/checkout@v4
+      # 🔑 NOUVEAU : Configuration des identifiants AWS pour l'accès S3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-north-1 # Région du bucket S3
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -189,6 +213,7 @@ jobs:
       - name: Install deps (TF stack)
         run: |
           python -m pip install -U pip
+          # ⚠️ CORRECTION REQUISE : La dépendance 'requirements_textcnn.txt' doit être mise à jour pour TensorFlow 2.15.0
           pip install -r requirements_textcnn.txt
           
       # NOUVELLE ÉTAPE : Vérification de la connexion MLflow
@@ -202,7 +227,8 @@ jobs:
           if [ ! -f "$DATA_CSV" ]; then
             if [ -n "$DATA_CSV_URL" ]; then
               echo "Downloading dataset from \$DATA_CSV_URL -> \$DATA_CSV"
-              curl -L "$DATA_CSV_URL" -o "$DATA_CSV"
+              # 🛠️ AJOUT : -f/--fail pour échouer sur code HTTP d'erreur
+              curl -fL "$DATA_CSV_URL" -o "$DATA_CSV"
             else
               echo "No dataset. Skipping job."
               exit 0
@@ -213,7 +239,8 @@ jobs:
             if [ -n "$GLOVE_200D_URL" ]; then
               echo "Downloading GloVe 200d from \$GLOVE_200D_URL -> \$EMB_PATH"
               mkdir -p "$(dirname "$EMB_PATH")"
-              curl -L "$GLOVE_200D_URL" -o "$EMB_PATH"
+              # 🛠️ AJOUT : -f/--fail pour échouer sur code HTTP d'erreur
+              curl -fL "$GLOVE_200D_URL" -o "$EMB_PATH"
             else
               echo "No embeddings. Skipping job."
               exit 0
@@ -242,6 +269,13 @@ jobs:
       DATA_CSV_URL: ${{ secrets.DATA_CSV_URL }} # optionnel
     steps:
       - uses: actions/checkout@v4
+      # 🔑 NOUVEAU : Configuration des identifiants AWS pour l'accès S3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-north-1 # Région du bucket S3
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -264,7 +298,8 @@ jobs:
           if [ ! -f "$DATA_CSV" ]; then
             if [ -n "$DATA_CSV_URL" ]; then
               echo "Downloading dataset from \$DATA_CSV_URL -> \$DATA_CSV"
-              curl -L "$DATA_CSV_URL" -o "$DATA_CSV"
+              # 🛠️ AJOUT : -f/--fail pour échouer sur code HTTP d'erreur
+              curl -fL "$DATA_CSV_URL" -o "$DATA_CSV"
             else
               echo "No dataset. Skipping job."
               exit 0

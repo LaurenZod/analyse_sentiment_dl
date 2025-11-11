@@ -51,16 +51,22 @@ def load_balanced_subset_csv(path, per_class, chunksize=100_000, seed=42):
         # Mapping cohérent: 0 = négatif (target=0), 1 = positif (target=4)
         chunk["label"] = chunk["target"].map({0: 0, 4: 1})
         chunk.dropna(subset=["label"], inplace=True)
+
+        if chunk.empty:
+            continue
+
         chunk["label"] = chunk["label"].astype(int)
 
         cneg = chunk[chunk["label"] == 0][["text","label"]]
         cpos = chunk[chunk["label"] == 1][["text","label"]]
+
         if want_neg > 0 and len(cneg):
             take = min(want_neg, len(cneg)); neg_parts.append(cneg.sample(n=take, random_state=seed)); want_neg -= take
         if want_pos > 0 and len(cpos):
             take = min(want_pos, len(cpos)); pos_parts.append(cpos.sample(n=take, random_state=seed)); want_pos -= take
         if want_neg <= 0 and want_pos <= 0:
             break
+        
     df = pd.concat(neg_parts + pos_parts, ignore_index=True)
     return df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
 

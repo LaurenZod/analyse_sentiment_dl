@@ -99,12 +99,13 @@ def main():
         sep=",", encoding="ISO-8859-1", quotechar='"', engine="python"
     )
     if args.subset_rows:
-        df_full = pd.read_csv(args.data, **read_kwargs)
+        df_full = pd.read_csv(args.data, on_bad_lines="skip", **read_kwargs)
+        
         df_full["label"] = df_full["target"].map({0:0, 4:1})
         df_full.dropna(subset=["label"], inplace=True)
         df_full["label"] = df_full["label"].astype(int)
-
         n = args.subset_rows // 2
+        df_full = df_full[["text", "label"]]
         # Sécurise si une classe a moins que n (label: 0 = négatif, 1 = positif)
         n_neg = min(n, (df_full["label"] == 0).sum())
         n_pos = min(n, (df_full["label"] == 1).sum())
@@ -112,11 +113,12 @@ def main():
         df_pos = df_full[df_full["label"] == 1].sample(n=n_pos, random_state=args.random_state)
         df = pd.concat([df_neg, df_pos]).sample(frac=1.0, random_state=args.random_state).reset_index(drop=True)
     else:
-        df = pd.read_csv(args.data, **read_kwargs)
+        df = pd.read_csv(args.data, on_bad_lines="skip", **read_kwargs)
         df["label"] = df["target"].map({0:0, 4:1})
         df.dropna(subset=["label"], inplace = True)
-        df = df[["text","label"]]
         df["label"] = df["label"].astype(int)
+        df = df[["text","label"]]
+        
 
     # Prétraitement léger
     X = df["text"].astype(str).apply(transform_bow)
