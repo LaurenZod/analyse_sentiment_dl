@@ -88,8 +88,9 @@ def main():
     np.random.seed(args.random_state)
     random.seed(args.random_state)
 
-    # MLflow
-    mlflow.set_tracking_uri("file:./mlruns")
+    # MLflow: utilise MLFLOW_TRACKING_URI si défini, sinon fallback local
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "file:./mlruns")
+    mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(args.experiment)
 
     # Lecture CSV (Sentiment140)
