@@ -314,36 +314,48 @@ def main():
 
         try_mlflow(mlflow.set_tags, {"framework": "transformers", "hf_model": args.model_name, "device": str(device)})
 
-        # Recharge le meilleure modèle et log via chemin du checkpoint uniquement
+        # Recharge le meilleur modèle et log vers MLflow + Model Registry
         pipe = pipeline(
             task="text-classification",
             model=best_path,
             tokenizer=best_path,
-            device=-1
+            device=-1  # CPU pour la sérialisation
         )
 
-        # Sauvegarde locale au format MLflow Transformers (crée le dossier 'bert_model' avec MLmodel)
-        mlflow_hf.save_model(
-            transformers_model=pipe,
-            path="bert_model",
-            task="text-classification"
-        )
+        # Log du modèle au format MLflow + enregistrement dans le Model Registry
+        try:
+            model_info = mlflow_hf.log_model(
+                transformers_model=pipe,
+                artifact_path="bert_model",
+                task="text-classification",
+                registered_model_name="tweet_prediction",
+            )
+            print(f"[MLflow] Modèle loggué dans les artefacts : {model_info.model_uri}")
+        except Exception as e:
+            print(f"[MLflow WARN] log_model failed: {e}")
+            model_info = None
 
-        # Enregistrement dans le Model Registry sous le nom demandé
-        reg = mlflow.register_model(
-            model_uri=f"runs:/{run.info.run_id}/bert_model",
-            name="tweet_prediction"
-        )
-
-        # Alias optionnel
+        # Alias optionnel (si on connaît la version créée)
         if args.register_alias:
             try:
-                MlflowClient().set_registered_model_alias(
-                    name="tweet_prediction",
-                    alias=args.register_alias,
-                    version=reg.version
-                )
-                print(f"[MLflow] Alias '{args.register_alias}' -> v{reg.version}")
+                client = MlflowClient()
+                created_version = None
+                if model_info is not None:
+                    # retrouver la version dont la source correspond au model_uri loggué
+                    for mv in client.get_latest_versions("tweet_prediction"):
+                        if mv.source == model_info.model_uri:
+                            created_version = mv.version
+                            break
+
+                if created_version is not None:
+                    client.set_registered_model_alias(
+                        name="tweet_prediction",
+                        alias=args.register_alias,
+                        version=created_version,
+                    )
+                    print(f"[MLflow] Alias '{args.register_alias}' -> v{created_version}")
+                else:
+                    print("[MLflow WARN] Impossible de retrouver la version créée pour poser l'alias.")
             except Exception as e:
                 print(f"[MLflow WARN] set alias failed: {e}")
 

@@ -8,7 +8,12 @@ on:
       - "scripts/run_textcnn.py"
       - "scripts/run_logreg.py"
       - "requirements.txt"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force_all:
+        description: "Forcer l'entraînement de tous les modèles"
+        required: false
+        default: "false"
 
 jobs:
   # Détection des fichiers modifiés
@@ -42,7 +47,7 @@ jobs:
   # --------------------------
   train-bert:
     needs: detect-changes
-    if: needs.detect-changes.outputs.bert == 'true' || needs.detect-changes.outputs.common == 'true'
+    if: needs.detect-changes.outputs.bert == 'true' || needs.detect-changes.outputs.common == 'true' || github.event.inputs.force_all == 'true'
     runs-on: ubuntu-latest
     env:
       MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
@@ -105,7 +110,7 @@ jobs:
   # --------------------------
   train-lstm:
     needs: detect-changes
-    if: needs.detect-changes.outputs.lstm == 'true' || needs.detect-changes.outputs.common == 'true'
+    if: needs.detect-changes.outputs.lstm == 'true' || needs.detect-changes.outputs.common == 'true' || github.event.inputs.force_all == 'true'
     runs-on: ubuntu-latest
     env:
       MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
@@ -179,7 +184,7 @@ jobs:
   # --------------------------
   train-textcnn:
     needs: detect-changes
-    if: needs.detect-changes.outputs.textcnn == 'true' || needs.detect-changes.outputs.common == 'true'
+    if: needs.detect-changes.outputs.textcnn == 'true' || needs.detect-changes.outputs.common == 'true' || github.event.inputs.force_all == 'true'
     runs-on: ubuntu-latest
     env:
       MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
@@ -256,7 +261,7 @@ jobs:
   # --------------------------
   train-logreg:
     needs: detect-changes
-    if: needs.detect-changes.outputs.logreg == 'true' || needs.detect-changes.outputs.common == 'true'
+    if: needs.detect-changes.outputs.logreg == 'true' || needs.detect-changes.outputs.common == 'true' || github.event.inputs.force_all == 'true'
     runs-on: ubuntu-latest
     env:
       MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
