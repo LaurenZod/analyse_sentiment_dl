@@ -1,4 +1,5 @@
 import os
+import uuid
 from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
 
@@ -54,6 +55,8 @@ class PredictOut(BaseModel):
     model_name: str
     model_version: Optional[str] = None
     model_stage: Optional[str] = None
+    prediction_id: Optional[str] = None
+    timestamp: Optional[float] = None
 
 class HealthOut(BaseModel):
     status: str
@@ -64,7 +67,7 @@ class HealthOut(BaseModel):
 
 # --- NOUVEAU MODÈLE POUR LE FEEDBACK ---
 class FeedbackIn(BaseModel):
-    timestamp: float
+    prediction_id: str
     ground_truth: str
     
     @field_validator("ground_truth")
@@ -256,7 +259,7 @@ def _run_pipeline_single(text: str) -> Dict[str, Any]:
     return {"label": label, "score": score, "raw_label": raw_label}
 
 # --- NOUVELLE FONCTION POUR METTRE À JOUR LE LOG AVEC LE GROUND TRUTH ---
-def _update_log_with_feedback(timestamp: float, ground_truth: str):
+def _update_log_with_feedback(prediction_id: str, ground_truth: str):
     """Lit le log, met à jour l'entrée correspondante, et réécrit le fichier."""
     
     lines = []
@@ -268,8 +271,8 @@ def _update_log_with_feedback(timestamp: float, ground_truth: str):
             for line in f:
                 try:
                     data = json.loads(line)
-                    # Trouver la ligne correspondante au timestamp (clé unique)
-                    if data.get("timestamp") == timestamp:
+                    # Trouver la ligne correspondante au prediction_id (clé unique)
+                    if data.get("prediction_id") == prediction_id:
                         data["ground_truth"] = ground_truth.lower()
                         found = True
                     lines.append(json.dumps(data))
@@ -283,7 +286,7 @@ def _update_log_with_feedback(timestamp: float, ground_truth: str):
 
     if not found:
         # S'assurer que l'inférence a été trouvée
-        raise HTTPException(status_code=404, detail=f"Inference with timestamp {timestamp} not found.")
+        raise HTTPException(status_code=404, detail=f"Inference with prediction_id {prediction_id} not found.")
 
     # Réécrire l'intégralité du fichier avec la ligne mise à jour
     try:
@@ -303,11 +306,14 @@ def predict(body: PredictIn):
     start_time = time.time()
     
     try:
+        prediction_timestamp = time.time()
+        prediction_id = str(uuid.uuid4())
         res = _run_pipeline_single(body.text)
         
         # --- LOGGING DE LA PRODUCTION ---
         log_data = {
-            "timestamp": time.time(),
+            "timestamp": prediction_timestamp,
+            "prediction_id": prediction_id,
             "model_version": MODEL_VERSION,
             "input_text": body.text,
             "prediction_label": res["label"],
@@ -328,6 +334,8 @@ def predict(body: PredictIn):
             model_name=MODEL_NAME,
             model_version=MODEL_VERSION,
             model_stage=MODEL_STAGE,
+            prediction_id=prediction_id,
+            timestamp=prediction_timestamp,
         )
     except HTTPException:
         raise
@@ -355,10 +363,10 @@ def predict_batch(body: PredictBatchIn):
 # --- NOUVEL ENDPOINT POUR LE GROUND TRUTH ---
 @app.post("/feedback", dependencies=[Depends(require_api_key)])
 def submit_feedback(body: FeedbackIn):
-    """Permet de fournir le ground truth pour une inférence précédente en utilisant le timestamp comme ID."""
+    """Permet de fournir le ground truth pour une inférence précédente en utilisant prediction_id comme ID."""
     try:
         res = _update_log_with_feedback(
-            timestamp=body.timestamp, 
+            prediction_id=body.prediction_id, 
             ground_truth=body.ground_truth
         )
         return res
